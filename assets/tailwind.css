@@ -1,0 +1,11 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom draggable helper */
+.draggable-overlay {
+  cursor: grab;
+}
+.draggable-overlay:active {
+  cursor: grabbing;
+}

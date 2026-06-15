@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Meeting Record Extension - Sơ đồ Luồng Hoạt Động</title>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Mermaid JS -->
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <style>
+    :root {
+      --bg-primary: #f8fafc;
+      --bg-card: #ffffff;
+      --text-main: #0f172a;
+      --text-muted: #64748b;
+      --border-color: #e2e8f0;
+      --primary: #4f46e5;
+      --primary-hover: #4338ca;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      background-color: var(--bg-primary);
+      color: var(--text-main);
+      margin: 0;
+      padding: 0;
+      line-height: 1.5;
+    }
+
+    header {
+      background-color: var(--bg-card);
+      border-bottom: 1px solid var(--border-color);
+      padding: 24px 40px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.05);
+    }
+
+    header h1 {
+      margin: 0;
+      font-size: 1.5rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #4f46e5 0%, #06b6d4 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 16px;
+    }
+
+    .nav-link {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.9rem;
+      font-weight: 500;
+      padding: 8px 12px;
+      border-radius: 6px;
+      transition: all 0.2s;
+    }
+
+    .nav-link:hover {
+      color: var(--primary);
+      background-color: #f1f5f9;
+    }
+
+    main {
+      max-width: 1200px;
+      margin: 40px auto;
+      padding: 0 24px;
+    }
+
+    .intro {
+      margin-bottom: 40px;
+      background: linear-gradient(135deg, #e0e7ff 0%, #cffafe 100%);
+      padding: 32px;
+      border-radius: 12px;
+      border: 1px solid #c7d2fe;
+    }
+
+    .intro h2 {
+      margin-top: 0;
+      color: #1e1b4b;
+      font-weight: 700;
+    }
+
+    .intro p {
+      color: #312e81;
+      margin-bottom: 0;
+    }
+
+    .diagram-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 32px;
+      margin-bottom: 48px;
+      box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05), 0 2px 4px -2px rgb(0 0 0 / 0.05);
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    .diagram-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.05), 0 4px 6px -4px rgb(0 0 0 / 0.05);
+    }
+
+    .diagram-title {
+      font-size: 1.25rem;
+      font-weight: 700;
+      margin-top: 0;
+      margin-bottom: 12px;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .diagram-title span {
+      background: #e0e7ff;
+      color: var(--primary);
+      padding: 4px 10px;
+      border-radius: 9999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+
+    .diagram-desc {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+      margin-bottom: 24px;
+    }
+
+    .mermaid-wrapper {
+      display: block;
+      background-color: #fafafa;
+      border-radius: 8px;
+      padding: 24px;
+      border: 1px dashed var(--border-color);
+      overflow-x: auto;
+    }
+
+    .mermaid {
+      display: inline-block;
+      min-width: 100%;
+      text-align: center;
+    }
+
+    .mermaid svg {
+      max-width: none !important;
+      height: auto !important;
+      margin: 0 auto;
+    }
+
+    footer {
+      text-align: center;
+      padding: 40px;
+      color: var(--text-muted);
+      font-size: 0.875rem;
+      border-top: 1px solid var(--border-color);
+      margin-top: 80px;
+      background-color: var(--bg-card);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Meeting Record Extension</h1>
+    <div class="nav-links">
+      <a href="#diagram-1" class="nav-link">1. Luồng Ghi hình & Đồng bộ</a>
+      <a href="#diagram-2" class="nav-link">2. Tương tác Popup UI</a>
+      <a href="#diagram-3" class="nav-link">3. Phục hồi Sự cố</a>
+      <a href="#diagram-4" class="nav-link">4. Ghép nối Backend</a>
+    </div>
+  </header>
+
+  <main>
+    <div class="intro">
+      <h2>Sơ đồ luồng hoạt động chi tiết</h2>
+      <p>Trang này chứa toàn bộ sơ đồ Mermaid biểu diễn kiến trúc và luồng dữ liệu của ứng dụng ghi hình cuộc họp. Bạn có thể xem trực quan, kéo dãn hoặc sao chép mã nguồn để cập nhật sơ đồ.</p>
+    </div>
+
+    <!-- Card 1 -->
+    <div class="diagram-card" id="diagram-1">
+      <h3 class="diagram-title">
+        <span>Sơ đồ 1</span> Luồng Vòng đời Ghi hình & Đồng bộ hóa Dữ liệu (Sequence)
+      </h3>
+      <p class="diagram-desc">Mô tả chi tiết giao tiếp giữa Content Script, Background, Offscreen Document, IndexedDB và Ingestion API Server khi bắt đầu, ghi hình, lưu trữ và kết thúc phiên.</p>
+      <div class="mermaid-wrapper">
+        <pre class="mermaid">
+        sequenceDiagram
+            autonumber
+            participant U as Người dùng (User)
+            participant C as Content Script (content.ts)
+            participant B as Background (background.ts)
+            participant O as Offscreen Doc (offscreen.ts)
+            participant DB as IndexedDB (MeetingDataCollectorDB)
+            participant API as Ingestion API (routes.ts)
+
+            C->>C: Quét DOM tìm nút Leave & Mic (mỗi 1s)
+            Note over C: Phát hiện Cuộc họp Hoạt động (Active)
+            C->>U: Hiển thị hộp thoại xin quyền (MeetingPrompt.vue)
+            U->>C: Nhấp "Start Recording" (Đồng ý)
+            C->>B: Gửi tin nhắn START_RECORDING (sessionId, platform)
+            
+            B->>B: Gọi setupOffscreen() (Tải offscreen.html)
+            B->>O: Chuyển tiếp START_RECORDING
+            O->>U: Yêu cầu quyền Media (getDisplayMedia)
+            U->>O: Chọn Tab/Màn hình + Tích chọn "Share tab audio"
+            O->>B: Trả kết quả thành công & Trạng thái Audio
+            B->>C: Broadcast RECORDING_STATE_CHANGED ('recording')
+            C->>U: Mount Thanh điều khiển nổi (RecorderOverlay.vue)
+
+            loop Mỗi 5 giây (MediaRecorder Slices)
+                O->>O: Xuất phân đoạn (chunk) Blob dữ liệu WebM
+                O->>O: Tính Checksum SHA-256 của Blob
+                O->>DB: saveChunk() lưu chunk (uploadState: 'pending')
+                O->>O: startUploadWorker() (Kích hoạt worker tải lên)
+                
+                rect rgb(230, 240, 255)
+                    Note over O, API: Upload Worker (Chạy song song bất đồng bộ)
+                    O->>DB: Đọc các chunk pending/failed xếp theo chunkIndex
+                    O->>DB: Cập nhật uploadState: 'uploading'
+                    O->>API: POST /recordings/:id/chunks (Form data + checksum + Idempotency-Key)
+                    API->>API: Lưu tệp chunk .webm vào uploads/chunks/
+                    API-->>O: Phản hồi 201 Created (Thành công)
+                    O->>DB: Cập nhật uploadState: 'uploaded', gán blob = null (Giải phóng RAM ngay lập tức)
+                    O->>B: Gửi tin nhắn UPLOAD_PROGRESS_UPDATE
+                    B->>C: Broadcast tiến độ lên Overlay UI
+                end
+            end
+
+            U->>C: Nhấp nút "Stop" trên Overlay (hoặc Stop Sharing từ Chrome)
+            C->>B: Gửi tin nhắn STOP_RECORDING
+            B->>O: Chuyển tiếp STOP_RECORDING
+            O->>O: Dừng MediaRecorder & Dừng tất cả MediaTracks
+            O->>DB: Cập nhật trạng thái session sang 'completed'
+            loop Chờ đợi hoàn thành tải lên
+                O->>DB: Kiểm tra số lượng chunk còn pending/uploading
+            end
+            O->>API: POST /recordings/:id/complete (Yêu cầu ráp luồng)
+            API->>API: Ráp tuần tự các chunk .webm thành file hoàn chỉnh
+            API-->>O: Phản hồi Assembly Complete (200 OK)
+            O->>B: Báo cáo kết thúc hoàn tất
+            B->>O: Đóng Offscreen Document (closeDocument)
+            B->>C: Broadcast RECORDING_STATE_CHANGED ('completed')
+            C->>U: Hiển thị thông báo thành công (3s) & Unmount Overlay
+        </pre>
+      </div>
+    </div>
+
+    <!-- Card 2 -->
+    <div class="diagram-card" id="diagram-2">
+      <h3 class="diagram-title">
+        <span>Sơ đồ 2</span> Luồng Giao Tiếp & Tương Tác từ Popup UI
+      </h3>
+      <p class="diagram-desc">Các tác vụ xử lý khi người dùng thao tác trên giao diện Popup của extension (Dashboard, Library, Console).</p>
+      <div class="mermaid-wrapper">
+        <pre class="mermaid">
+        graph TD
+            User([Người dùng]) -->|Click Icon Extension| Popup[Popup UI: entrypoints/popup/App.vue]
+            
+            subgraph Popup Tabs [Các Tab Giao Diện Popup]
+                Dashboard[Dashboard Tab]
+                Library[Library Tab]
+                Console[Console Tab]
+            end
+            
+            Popup --> Dashboard
+            Popup --> Library
+            Popup --> Console
+            
+            Dashboard -->|onMounted| HealthCheck[Ping API Server: /health]
+            HealthCheck -->|Kết quả| StatusServer[Hiển thị trạng thái: ONLINE / OFFLINE]
+            Dashboard -->|onMounted| QueryStatus[Gửi GET_STATUS tới Background]
+            QueryStatus -->|Kết quả từ Offscreen/BG| SyncUI[Cập nhật UI Card: Recording / Idle / Paused]
+            Dashboard -->|Click Redetect| ManualScan[Gửi TRIGGER_REDETECT tới Content Script]
+            ManualScan -->|DOM Scan hoạt động| RenderPrompt[Kích hoạt Consent Prompt trên Meet/Teams]
+            
+            Library -->|onMounted| LoadDB[Đọc recordings & chunks từ IndexedDB]
+            LoadDB -->|Hiển thị list| ListSessions[Hiển thị các phiên ghi & tiến độ upload]
+            ListSessions -->|Click Export WebM| MergeBlobs[Đọc & sắp xếp toàn bộ Blob cục bộ của Session]
+            MergeBlobs -->|Khởi tạo Blob tổng hợp| DownFile[Tải file .webm trực tiếp về máy qua URL ảo]
+            ListSessions -->|Click Sync| ResumeSync[Đánh thức Upload Worker tải lại chunks pending/failed]
+            ListSessions -->|Click Delete| DeleteSession[Xóa metadata & chunks khỏi IndexedDB]
+            
+            Console -->|onMounted| GetLogs[Đọc log chẩn đoán từ chrome.storage.local]
+            Console -->|Hiển thị| ShowLogs[Hiển thị Terminal Logs dạng cuộn]
+            Console -->|Click Clear| ClearLogs[Xóa sạch log khỏi chrome.storage.local]
+        </pre>
+      </div>
+    </div>
+
+    <!-- Card 3 -->
+    <div class="diagram-card" id="diagram-3">
+      <h3 class="diagram-title">
+        <span>Sơ đồ 3</span> Luồng Khôi Phục Sự Cố & Quản Lý Upload Queue
+      </h3>
+      <p class="diagram-desc">Thuật toán xếp hàng tải lên resilient, tự phục hồi lỗi mạng (Exponential Backoff), và dọn dẹp dung lượng đệm IndexedDB cục bộ.</p>
+      <div class="mermaid-wrapper">
+        <pre class="mermaid">
+        graph TD
+            Start([Khởi động Extension / Khởi chạy Offscreen]) --> OpenDB[Kết nối IndexedDB: MeetingDataCollectorDB]
+            OpenDB --> StartWorker[Khởi chạy startUploadWorker]
+            
+            subgraph Upload Queue Worker [Worker Tải Lên Tuần Tự]
+                GetPending[getPendingChunks: Lọc chunk pending/failed/retrying]
+                CheckEmpty{Hàng đợi trống?}
+                SortChunks[Sắp xếp tăng dần theo chunkIndex]
+                ProcessChunk[Duyệt từng Chunk để tải lên]
+                
+                ReadBlob{Dữ liệu nhị phân Blob tồn tại?}
+                MarkFailed[Đánh dấu chunk uploadState: 'failed']
+                
+                SendPOST[POST /recordings/:id/chunks]
+                AddHeaders[Header: Idempotency-Key = chunkId <br/> Payload: Chunk File + Checksum]
+                
+                CheckSuccess{Tải lên thành công?}
+                UpdateSuccess[Cập nhật uploadState: 'uploaded']
+                ClearBlob[Gán blob = null để giải phóng bộ nhớ IndexedDB]
+                
+                IncRetry[Tăng retryCount]
+                CheckMaxRetry{retryCount >= 5?}
+                MarkRetrying[Đặt uploadState: 'retrying' <br/> Chuẩn bị Exponential Backoff]
+            end
+            
+            StartWorker --> GetPending
+            GetPending --> CheckEmpty
+            CheckEmpty -->|Đúng| Sleep([Worker tạm dừng & đi ngủ])
+            CheckEmpty -->|Sai| SortChunks
+            SortChunks --> ProcessChunk
+            ProcessChunk --> ReadBlob
+            ReadBlob -->|Không| MarkFailed --> NextChunk[Chuyển sang chunk tiếp theo]
+            ReadBlob -->|Có| SendPOST
+            SendPOST -.-> AddHeaders
+            SendPOST --> CheckSuccess
+            
+            CheckSuccess -->|Có| UpdateSuccess --> ClearBlob --> BroadcastProgress[Gửi tin nhắn UPLOAD_PROGRESS_UPDATE]
+            BroadcastProgress --> NextChunk
+            
+            CheckSuccess -->|Không| IncRetry --> CheckMaxRetry
+            CheckMaxRetry -->|Có| MarkFailed --> BroadcastProgress
+            CheckMaxRetry -->|Không| MarkRetrying --> BroadcastProgress
+            
+            NextChunk --> LoopBack[Kiểm tra hàng đợi sau 2 giây]
+            LoopBack --> GetPending
+        </pre>
+      </div>
+    </div>
+
+    <!-- Card 4 -->
+    <div class="diagram-card" id="diagram-4">
+      <h3 class="diagram-title">
+        <span>Sơ đồ 4</span> Luồng Xử Lý Lắp Ghép Video Phía Backend
+      </h3>
+      <p class="diagram-desc">Cách thức Ingestion API Server tiếp nhận phân đoạn, xác thực checksum và chống ghi lặp (Idempotent), cùng quy trình gộp nối file video hoàn thiện.</p>
+      <div class="mermaid-wrapper">
+        <pre class="mermaid">
+        graph TD
+            Client([Chrome Extension]) -->|1. POST /recordings| CreateSession[Khởi tạo Session trong DB]
+            Client -->|2. POST /recordings/:id/chunks| UploadChunk[Nhận Chunk File]
+            
+            subgraph Chunk Ingestion Pipeline [Xử lý Phân đoạn Tải lên]
+                CheckIdempotency{Idempotency-Key <br/> đã tồn tại trong DB?}
+                VerifyChecksum{SHA-256 Checksum <br/> trùng khớp?}
+                SaveDisk[Lưu file chunk .webm <br/> tại uploads/chunks/]
+                SaveDB[Lưu metadata chunk vào DB]
+                CreatePlaceholder[Tạo session placeholder nếu chưa có]
+            end
+            
+            UploadChunk --> CheckIdempotency
+            CheckIdempotency -->|Có| Return200[Phản hồi 200 OK: Đã tồn tại]
+            CheckIdempotency -->|Không| VerifyChecksum
+            VerifyChecksum -->|Không| Return400[Phản hồi 400 Bad Request: Checksum mismatch]
+            VerifyChecksum -->|Có| SaveDisk
+            SaveDisk --> CreatePlaceholder
+            CreatePlaceholder --> SaveDB
+            SaveDB --> Return201[Phản hồi 201 Created: Thành công]
+            
+            Client -->|3. POST /recordings/:id/complete| CompleteSession[Yêu cầu hoàn tất & Assembly]
+            
+            subgraph Assembly Pipeline [Quy trình Ghép nối Video]
+                FindChunks[Tìm tất cả chunks của Session, sắp xếp theo chunkIndex]
+                ValidateIndices{Có thiếu phân đoạn <br/> trung gian nào không?}
+                LogMissing[Ghi nhận cảnh báo thiếu chunk]
+                CreateStream[Khởi tạo WriteStream: uploads/assembled/:id.webm]
+                WriteSeq[Đọc tuần tự từng file chunk và ghi vào Stream]
+                CloseStream[Đóng Stream & Giải phóng file hoàn chỉnh]
+                UpdateStatus[Cập nhật trạng thái Session sang 'completed' trong DB]
+            end
+            
+            CompleteSession --> FindChunks
+            FindChunks --> ValidateIndices
+            ValidateIndices -->|Có| LogMissing --> CreateStream
+            ValidateIndices -->|Không| CreateStream
+            CreateStream --> WriteSeq
+            WriteSeq --> CloseStream
+            CloseStream --> UpdateStatus
+            UpdateStatus --> Return200Assembly[Phản hồi 200 OK: Assembly Complete]
+        </pre>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <p>&copy; 2026 - Meeting Record Extension Architecture Documentation</p>
+  </footer>
+
+  <script>
+    mermaid.initialize({ 
+      startOnLoad: true,
+      theme: 'default',
+      securityLevel: 'loose'
+    });
+  </script>
+</body>
+</html>
