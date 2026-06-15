@@ -1,8 +1,8 @@
 {
-  "name": "meeting-data-collector-extension",
-  "version": "1.0.0",
-  "description": "Chrome Extension for Meeting Data Ingestion",
+  "name": "wxt-react-starter",
+  "description": "manifest.json description",
   "private": true,
+  "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "wxt",
@@ -10,25 +10,19 @@
     "build": "wxt build",
     "build:firefox": "wxt build -b firefox",
     "zip": "wxt zip",
-    "postinstall": "wxt prepare",
-    "test": "node tests/run-tests-happy.js"
+    "zip:firefox": "wxt zip -b firefox",
+    "compile": "tsc --noEmit",
+    "postinstall": "wxt prepare"
   },
   "dependencies": {
-    "@vueuse/core": "^10.11.0",
-    "lucide-vue-next": "^0.469.0",
-    "pinia": "^2.1.7",
-    "vue": "^3.4.31"
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
   },
   "devDependencies": {
-    "@wxt-dev/module-vue": "^1.0.1",
-    "autoprefixer": "^10.4.19",
-    "happy-dom": "^20.10.3",
-    "jsdom": "^29.1.1",
-    "postcss": "^8.4.38",
-    "tailwindcss": "^3.4.4",
-    "typescript": "^5.5.2",
-    "vitest": "^4.1.8",
-    "vue-tsc": "^2.0.22",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@wxt-dev/module-react": "^1.1.5",
+    "typescript": "^5.9.3",
     "wxt": "^0.20.26"
   }
 }

@@ -1,22 +1,18 @@
 import { defineConfig } from 'wxt';
 
+// See https://wxt.dev/api/config.html
 export default defineConfig({
-  modules: ['@wxt-dev/module-vue'],
   outDir: 'dist',
+  modules: ['@wxt-dev/module-react'],
   manifest: {
-    name: 'Meeting Data Collection Agent',
+    name: 'Screen Recorder',
+    description: 'A simple Chrome Extension for screen recording and audio mixing.',
     version: '1.0.0',
-    description: 'Production-ready meeting data collection agent for AI processing pipelines.',
     permissions: [
-      'storage',
       'offscreen',
-      'tabs',
+      'desktopCapture',
+      'downloads',
       'activeTab'
-    ],
-    host_permissions: [
-      'https://meet.google.com/*',
-      'https://teams.microsoft.com/*',
-      'https://teams.live.com/*'
     ]
   }
 });
