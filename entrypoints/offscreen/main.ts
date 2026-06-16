@@ -77,34 +77,60 @@ async function startCapture(message: {
       }
     }
 
-    // 3. Perform audio mixing
-    mixResult = mixAudioStreams(screenStream, micStream);
-
-    // 4. Construct final stream for MediaRecorder
+    // 3. Construct final stream for MediaRecorder
     const videoTrack = screenStream.getVideoTracks()[0];
     if (!videoTrack) {
       throw new Error('No video track found in screen capture stream');
     }
 
     const finalStream = new MediaStream([videoTrack]);
-    
-    if (mixResult && mixResult.mixedTrack) {
-      finalStream.addTrack(mixResult.mixedTrack);
-    }
-
-    // Keep tracks and context for cleanup, excluding finalStream tracks which are stopped by recorder
     const additionalTracksToCleanup: MediaStreamTrack[] = [];
-    if (micStream) {
-      additionalTracksToCleanup.push(...micStream.getTracks());
-    }
-    if (screenStream) {
-      const systemAudioTrack = screenStream.getAudioTracks()[0];
-      if (systemAudioTrack) {
-        additionalTracksToCleanup.push(systemAudioTrack);
+
+    const systemAudioTrack = screenStream.getAudioTracks()[0];
+    const micAudioTrack = micStream?.getAudioTracks()[0];
+
+    // Determine audio configuration based on available sources
+    if (systemAudioTrack && micAudioTrack) {
+      // Both streams are present -> Mix them using Web Audio API
+      mixResult = mixAudioStreams(screenStream, micStream);
+      if (mixResult && mixResult.mixedTrack) {
+        finalStream.addTrack(mixResult.mixedTrack);
+      }
+      
+      // Clean up source tracks because finalStream uses the mixed track
+      additionalTracksToCleanup.push(systemAudioTrack);
+      additionalTracksToCleanup.push(micAudioTrack);
+      if (micStream) {
+        micStream.getTracks().forEach(track => {
+          if (track !== micAudioTrack) {
+            additionalTracksToCleanup.push(track);
+          }
+        });
+      }
+    } else if (systemAudioTrack) {
+      // Only system audio is present -> Record natively without mixing
+      finalStream.addTrack(systemAudioTrack);
+      if (micStream) {
+        additionalTracksToCleanup.push(...micStream.getTracks());
+      }
+    } else if (micAudioTrack) {
+      // Only microphone is present -> Record natively without mixing
+      finalStream.addTrack(micAudioTrack);
+      if (micStream) {
+        micStream.getTracks().forEach(track => {
+          if (track !== micAudioTrack) {
+            additionalTracksToCleanup.push(track);
+          }
+        });
+      }
+    } else {
+      // No audio available
+      if (micStream) {
+        additionalTracksToCleanup.push(...micStream.getTracks());
       }
     }
 
-    // 5. Start MediaRecorder
+    // 4. Start MediaRecorder
     recorder?.start(
       finalStream,
       additionalTracksToCleanup,

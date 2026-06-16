@@ -89,7 +89,7 @@ function startRecordingFlow() {
           left: 80,
           focused: false // Avoid stealing focus
         });
-        cameraWindowId = win.id || null;
+        cameraWindowId = win?.id || null;
       } catch (err) {
         console.error('Failed to create camera preview window:', err);
       }
