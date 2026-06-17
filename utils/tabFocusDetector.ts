@@ -24,21 +24,7 @@ export class TabFocusDetector {
     this.monitoredTabIds.clear();
   }
 
-  addTab(tabId: number): void {
-    if (tabId > 0) {
-      this.monitoredTabIds.add(tabId);
-    }
-  }
-
-  removeTab(tabId: number): void {
-    this.monitoredTabIds.delete(tabId);
-  }
-
-  getMonitoredTabs(): number[] {
-    return Array.from(this.monitoredTabIds);
-  }
-
-  private handleActivated = (info: chrome.tabs.TabActiveInfo): void => {
+  private handleActivated = (info: { tabId: number; windowId: number }): void => {
     if (!this.enabled) {
       return;
     }

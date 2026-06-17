@@ -1,4 +1,6 @@
 import React, { useEffect, useRef } from 'react';
+import { Mic } from 'lucide-react';
+import { Icon } from './Icon';
 
 interface MicLevelMeterProps {
   enabled: boolean;
@@ -71,7 +73,10 @@ export const MicLevelMeter: React.FC<MicLevelMeterProps> = ({ enabled }) => {
 
   return (
     <div className="mic-meter">
-      <span className="mic-meter-label">Mic level</span>
+      <span className="mic-meter-label">
+        <Icon icon={Mic} size={14} className="mic-meter-icon" />
+        Mic level
+      </span>
       <div className="mic-meter-track">
         <div ref={barRef} className="mic-meter-bar" />
       </div>

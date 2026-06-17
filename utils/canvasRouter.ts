@@ -1,6 +1,10 @@
 /**
  * Routes an active video source through a hidden canvas so MediaRecorder
  * keeps a stable output stream while the underlying capture source changes.
+ *
+ * IMPORTANT: this runs inside an offscreen document, which is never painted.
+ * `requestAnimationFrame` does not fire reliably there, so the draw loop and
+ * frame-wait use timers (setInterval / setTimeout) instead.
  */
 export interface CanvasRouterOptions {
   width?: number;
@@ -13,14 +17,15 @@ export class CanvasRouter {
   private ctx: CanvasRenderingContext2D;
   private videoElement: HTMLVideoElement;
   private outputStream: MediaStream;
-  private animFrameId: number | null = null;
+  private renderTimer: ReturnType<typeof setInterval> | null = null;
   private activeStream: MediaStream | null = null;
   private destroyed = false;
+  private fps: number;
 
   constructor(options: CanvasRouterOptions = {}) {
     const width = options.width ?? 1920;
     const height = options.height ?? 1080;
-    const fps = options.fps ?? 30;
+    this.fps = options.fps ?? 30;
 
     this.canvas = document.createElement('canvas');
     this.canvas.width = width;
@@ -36,7 +41,7 @@ export class CanvasRouter {
     this.videoElement.muted = true;
     this.videoElement.playsInline = true;
 
-    this.outputStream = this.canvas.captureStream(fps);
+    this.outputStream = this.canvas.captureStream(this.fps);
     this.startRenderLoop();
   }
 
@@ -49,7 +54,7 @@ export class CanvasRouter {
     this.activeStream = stream;
     this.videoElement.srcObject = stream;
     this.videoElement.play().catch((err) => {
-      console.warn('CanvasRouter video play failed:', err);
+      console.warn('[canvasRouter] video play failed:', err);
     });
 
     if (previousStream && previousStream !== stream) {
@@ -65,6 +70,25 @@ export class CanvasRouter {
     return this.outputStream;
   }
 
+  /** Wait until the active source has a drawable frame (or timeout). */
+  waitForFrame(timeoutMs = 3000): Promise<void> {
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const poll = () => {
+        if (
+          this.destroyed ||
+          (this.activeStream && this.videoElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) ||
+          Date.now() - start > timeoutMs
+        ) {
+          resolve();
+          return;
+        }
+        setTimeout(poll, 50);
+      };
+      poll();
+    });
+  }
+
   resize(width: number, height: number): void {
     this.canvas.width = width;
     this.canvas.height = height;
@@ -73,9 +97,9 @@ export class CanvasRouter {
   destroy(): void {
     this.destroyed = true;
 
-    if (this.animFrameId !== null) {
-      cancelAnimationFrame(this.animFrameId);
-      this.animFrameId = null;
+    if (this.renderTimer !== null) {
+      clearInterval(this.renderTimer);
+      this.renderTimer = null;
     }
 
     if (this.activeStream) {
@@ -88,18 +112,14 @@ export class CanvasRouter {
   }
 
   private startRenderLoop(): void {
-    const render = () => {
+    const intervalMs = Math.max(1, Math.round(1000 / this.fps));
+    this.renderTimer = setInterval(() => {
       if (this.destroyed) {
         return;
       }
-
       if (this.activeStream && this.videoElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
         this.ctx.drawImage(this.videoElement, 0, 0, this.canvas.width, this.canvas.height);
       }
-
-      this.animFrameId = requestAnimationFrame(render);
-    };
-
-    render();
+    }, intervalMs);
   }
 }

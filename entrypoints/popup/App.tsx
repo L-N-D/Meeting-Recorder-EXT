@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { MicLevelMeter } from '../../components/MicLevelMeter';
 import { RecorderControls } from '../../components/RecorderControls';
 import {
@@ -6,6 +6,15 @@ import {
   type AudioMixSettings,
   type RecordingState,
 } from '../../utils/types';
+
+const CAPTURABLE_URL_PREFIXES = ['http://', 'https://'];
+
+function isCapturableTab(tab: chrome.tabs.Tab): boolean {
+  if (!tab.id || tab.id <= 0 || !tab.url) {
+    return false;
+  }
+  return CAPTURABLE_URL_PREFIXES.some((prefix) => tab.url!.startsWith(prefix));
+}
 
 function App() {
   const [recordingState, setRecordingState] = useState<RecordingState>('idle');
@@ -17,6 +26,28 @@ function App() {
     ...DEFAULT_AUDIO_SETTINGS,
   });
   const [error, setError] = useState<string | null>(null);
+  const [activeTabId, setActiveTabId] = useState<number | null>(null);
+
+  const [tabsList, setTabsList] = useState<chrome.tabs.Tab[]>([]);
+  const [selectedTabIds, setSelectedTabIds] = useState<number[]>([]);
+
+  const syncFromBackground = useCallback((state: {
+    recordingState: RecordingState;
+    duration: number;
+    error: string | null;
+    includeMic: boolean;
+    includeCam: boolean;
+    focusMode: boolean;
+    audioSettings: AudioMixSettings;
+  }) => {
+    setRecordingState(state.recordingState);
+    setDuration(state.duration);
+    setError(state.error);
+    setIncludeMic(state.includeMic);
+    setIncludeCam(state.includeCam);
+    setFocusMode(state.focusMode ?? false);
+    setAudioSettings(state.audioSettings ?? { ...DEFAULT_AUDIO_SETTINGS });
+  }, []);
 
   useEffect(() => {
     chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATUS' }, (response) => {
@@ -25,88 +56,90 @@ function App() {
         return;
       }
       if (response) {
-        setRecordingState(response.recordingState);
-        setDuration(response.duration);
-        setIncludeMic(response.includeMic);
-        setIncludeCam(response.includeCam);
-        setFocusMode(response.focusMode ?? false);
-        setAudioSettings(response.audioSettings ?? { ...DEFAULT_AUDIO_SETTINGS });
-        setError(response.error);
+        syncFromBackground(response);
       }
     });
 
     const handleMessage = (message: any) => {
       if (message.type === 'STATE_CHANGED' && message.state) {
-        setRecordingState(message.state.recordingState);
-        setDuration(message.state.duration);
-        setError(message.state.error);
-        setIncludeMic(message.state.includeMic);
-        setIncludeCam(message.state.includeCam);
-        setFocusMode(message.state.focusMode ?? false);
-        setAudioSettings(message.state.audioSettings ?? { ...DEFAULT_AUDIO_SETTINGS });
+        syncFromBackground(message.state);
       }
     };
 
     chrome.runtime.onMessage.addListener(handleMessage);
-
     return () => {
       chrome.runtime.onMessage.removeListener(handleMessage);
     };
-  }, []);
+  }, [syncFromBackground]);
 
-  const sendStartRecording = () => {
-    chrome.runtime.sendMessage(
-      {
-        type: 'START_RECORDING_FLOW',
-        includeMic,
-        includeCam,
-        focusMode,
-        audioSettings,
-      },
-      () => {
-        if (chrome.runtime.lastError) {
-          setError(`Failed to connect to background worker: ${chrome.runtime.lastError.message}`);
-          setRecordingState('idle');
-        }
+  useEffect(() => {
+    if (!focusMode || recordingState !== 'idle') {
+      return;
+    }
+
+    chrome.tabs.query({ windowType: 'normal' }, (tabs) => {
+      if (chrome.runtime.lastError) {
+        return;
       }
+
+      const filteredTabs = tabs.filter(isCapturableTab);
+      setTabsList(filteredTabs);
+
+      chrome.tabs.query({ active: true, currentWindow: true }, (activeTabs) => {
+        const activeTab = activeTabs[0];
+        if (activeTab?.id) {
+          setActiveTabId(activeTab.id);
+          setSelectedTabIds((prev) => {
+            if (prev.length === 0 && isCapturableTab(activeTab)) {
+              return [activeTab.id!];
+            }
+            return prev;
+          });
+        }
+      });
+    });
+  }, [focusMode, recordingState]);
+
+  const handleToggleTabSelection = (tabId: number) => {
+    setSelectedTabIds((prev) =>
+      prev.includes(tabId) ? prev.filter((id) => id !== tabId) : [...prev, tabId]
     );
+  };
+
+  const handleSelectAllTabs = () => {
+    setSelectedTabIds(tabsList.map((tab) => tab.id!).filter(Boolean));
+  };
+
+  const handleClearTabSelection = () => {
+    setSelectedTabIds([]);
   };
 
   const handleStartRecording = async () => {
     setError(null);
-    setRecordingState('starting');
 
-    let micGranted = true;
-    let camGranted = true;
-
-    try {
-      if (includeMic) {
-        const res = await navigator.permissions.query({ name: 'microphone' as PermissionName });
-        micGranted = res.state === 'granted';
-      }
-      if (includeCam) {
-        const res = await navigator.permissions.query({ name: 'camera' as PermissionName });
-        camGranted = res.state === 'granted';
-      }
-    } catch {
-      micGranted = false;
-      camGranted = false;
+    if (focusMode && selectedTabIds.length === 0) {
+      setError('Select at least one tab for Focus 1-1 mode.');
+      return;
     }
 
-    if ((includeMic && !micGranted) || (includeCam && !camGranted)) {
-      chrome.runtime.sendMessage({
-        type: 'SET_PENDING_RECORDING',
-        includeMic,
-        includeCam,
-        focusMode,
-        audioSettings,
-      });
+    let startingTabId: number | undefined;
 
-      chrome.tabs.create({
-        url: `permissions.html?mic=${includeMic}&cam=${includeCam}&focus=${focusMode}`,
-      });
-      window.close();
-      return;
+    if (focusMode) {
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+      if (!activeTab?.id || !selectedTabIds.includes(activeTab.id)) {
+        setError(
+          'Switch to one of the selected tabs before starting. Focus 1-1 records the tab you are viewing.'
+        );
+        return;
+      }
+
+      if (!isCapturableTab(activeTab)) {
+        setError('The active tab cannot be recorded. Open a regular http/https page first.');
+        return;
+      }
+
+      startingTabId = activeTab.id;
     }
 
     if (includeMic) {
@@ -114,12 +147,13 @@ function App() {
         const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
         micStream.getTracks().forEach((track) => track.stop());
       } catch (err: any) {
-        if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-          setError('Microphone device not found. Please connect a microphone or uncheck "Include Microphone".');
+        if (err.name === 'NotAllowedError' || err.message?.includes('Permission denied')) {
+          setError('Microphone permission denied. Allow access or turn off "Microphone".');
+        } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+          setError('No microphone found. Connect one or turn off "Microphone".');
         } else {
-          setError(`Microphone access error: ${err.message || 'Permission denied'}`);
+          setError(`Microphone error: ${err.message || err.toString()}`);
         }
-        setRecordingState('idle');
         return;
       }
     }
@@ -129,17 +163,33 @@ function App() {
         const camStream = await navigator.mediaDevices.getUserMedia({ video: true });
         camStream.getTracks().forEach((track) => track.stop());
       } catch (err: any) {
-        if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-          setError('Camera device not found. Please connect a webcam or uncheck "Include Camera".');
+        if (err.name === 'NotAllowedError' || err.message?.includes('Permission denied')) {
+          setError('Camera permission denied. Allow access or turn off "Camera overlay".');
+        } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+          setError('No camera found. Connect one or turn off "Camera overlay".');
         } else {
-          setError(`Camera access error: ${err.message || 'Permission denied'}`);
+          setError(`Camera error: ${err.message || err.toString()}`);
         }
-        setRecordingState('idle');
         return;
       }
     }
 
-    sendStartRecording();
+    chrome.runtime.sendMessage(
+      {
+        type: 'START_RECORDING_FLOW',
+        includeMic,
+        includeCam,
+        focusMode,
+        selectedTabIds,
+        audioSettings,
+        startingTabId,
+      },
+      () => {
+        if (chrome.runtime.lastError) {
+          setError(`Failed to start: ${chrome.runtime.lastError.message}`);
+        }
+      }
+    );
   };
 
   const handleStopRecording = () => {
@@ -175,6 +225,13 @@ function App() {
       onPause={handlePauseRecording}
       onResume={handleResumeRecording}
       error={error}
+      onDismissError={() => setError(null)}
+      tabsList={tabsList}
+      selectedTabIds={selectedTabIds}
+      activeTabId={activeTabId}
+      onToggleTabSelection={handleToggleTabSelection}
+      onSelectAllTabs={handleSelectAllTabs}
+      onClearTabSelection={handleClearTabSelection}
       micMeter={<MicLevelMeter enabled={includeMic && recordingState === 'idle'} />}
     />
   );

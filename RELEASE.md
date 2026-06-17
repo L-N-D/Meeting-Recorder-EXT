@@ -1,34 +1,50 @@
-# Release Notes - v1.0.0
+# Release Notes — v2.0.0
 
 ## Version
-* **Version:** 1.0.0
-* **Release Date:** 2026-06-16
+* **Version:** 2.0.0
+* **Release Date:** 2026-06-17
 
 ## Overview
-Screen Recorder is a Google Chrome Extension designed for high-quality screen recording with flexible audio options. It supports capturing system audio, microphone input, and an optional camera preview overlay, packaged inside a modern Manifest V3 architecture.
+Screen Recorder is a Chrome (Manifest V3) extension for high-quality screen
+recording with flexible audio and a Focus 1-1 mode that follows the tab you are
+viewing. The background service worker owns all recording state; the popup is a
+thin client that sends commands and renders broadcast state.
 
-## Available Features
-* **Screen & Tab Capture:** Streamlined recording using the browser's native `navigator.mediaDevices.getDisplayMedia`.
-* **Smart Audio Recording:**
-  * Automatically records screen/system audio natively when no microphone is selected.
-  * Automatically records microphone input natively if system audio is not present.
-  * Dynamically mixes both system audio and microphone streams using the Web Audio API when both are active, ensuring the user can still hear system audio through local speakers during recording.
-* **Camera Overlay Preview:** A floating picture-in-picture webcam popup helper window when "Include Camera" is enabled.
-* **Modern Controls UI:** Clean popup control panel featuring:
-  * Toggles for Microphone and Camera inputs.
-  * Real-time recording duration timer.
-  * Clear visual error reporting.
-* **Graceful Permissions Onboarding:** A dedicated helper tab (`permissions.html`) to guide users through granting microphone and webcam permissions when first requested.
-* **Auto-saving Downloads:** Automatically formats and saves the recording as an `mp4` (or fallback `webm`) file to the browser's default download folder upon stopping.
+## Features
+* **Screen & tab capture** using the native `getDisplayMedia` screen picker.
+* **Focus 1-1 (single active source):** select a set of tabs and the recording
+  automatically follows whichever selected tab is active, switching the source
+  without stopping `MediaRecorder` (a hidden canvas keeps the output stable).
+* **Smart audio:**
+  * Records system audio alone, microphone alone, or mixes both via the Web
+    Audio API with adjustable mic / system gains.
+  * Optional monitoring of system audio through the local speakers while
+    recording.
+* **Camera overlay:** an optional extension-origin webcam preview window that
+  reuses the extension's camera permission (reliable on any site).
+* **Pause / resume** with an accurate, pause-aware duration timer.
+* **Crash-resistant storage:** recording chunks stream to IndexedDB rather than
+  accumulating in memory.
+* **Reliable downloads:** the offscreen document is kept alive until the browser
+  confirms the download has completed, preventing truncated files.
 
 ## Current Limitations
-* **Browser Compatibility:** Only compatible with Chrome/Chromium-based browsers supporting Manifest V3 `offscreen` API.
-* **Webcam Overlay Placement:** The floating camera overlay opens as a static browser popup window (`top: 80`, `left: 80`) and must be moved or resized manually.
-* **Memory Constraints:** Recorded segments (Chunks) are accumulated in memory, which may lead to performance degradation during extremely long recordings.
-
-## Known Issues
-* None
+* Chromium-based browsers only (requires MV3 `offscreen` API).
+* In Focus 1-1, switching tabs carries video across sources; per-tab audio is
+  not re-mixed mid-recording.
+* The camera preview is a separate floating window and is not composited into
+  the recorded video.
 
 ## Notes
-* **Extension Permissions:** The extension requests `offscreen`, `desktopCapture`, `downloads`, and `activeTab` permissions.
-* **Audio Permissions:** Tab audio sharing must be explicitly checked in Chrome's native capture dialog for system audio to be recorded.
+* **Permissions:** `offscreen`, `desktopCapture`, `tabCapture`, `tabs`,
+  `downloads`, `activeTab`, `scripting`, `storage`, and `<all_urls>` host access.
+* **System audio:** the "Share tab/system audio" checkbox must be ticked in
+  Chrome's screen-picker dialog for system audio to be captured.
+
+## Changes since v1.0.0
+* Added Focus 1-1 tab-following recording and the audio mix panel.
+* Added pause / resume and a live mic level meter.
+* Switched the camera overlay to a reliable extension-origin window.
+* Fixed a download race that could truncate large recordings.
+* Removed dead code (unused in-page widget, permissions onboarding page, and
+  unwired "add source" path) for a cleaner, easier-to-debug codebase.

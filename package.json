@@ -1,8 +1,8 @@
 {
-  "name": "wxt-react-starter",
-  "description": "manifest.json description",
+  "name": "screen-recorder-extension",
+  "description": "A Chrome (MV3) screen recorder with Focus 1-1 tab following and audio mixing.",
   "private": true,
-  "version": "0.0.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
     "dev": "wxt",
@@ -16,10 +16,12 @@
   },
   "dependencies": {
     "fix-webm-duration": "^1.0.6",
+    "lucide-react": "^1.20.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },
   "devDependencies": {
+    "@types/chrome": "^0.1.43",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@wxt-dev/module-react": "^1.1.5",

@@ -12,13 +12,6 @@ export const DEFAULT_AUDIO_SETTINGS: AudioMixSettings = {
   routeSystemToSpeakers: false,
 };
 
-export interface PendingRecordingIntent {
-  includeMic: boolean;
-  includeCam: boolean;
-  focusMode: boolean;
-  audioSettings: AudioMixSettings;
-}
-
 export interface RecordingStatusPayload {
   recordingState: RecordingState;
   duration: number;
