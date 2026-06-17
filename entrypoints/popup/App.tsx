@@ -30,6 +30,8 @@ function App() {
 
   const [tabsList, setTabsList] = useState<chrome.tabs.Tab[]>([]);
   const [selectedTabIds, setSelectedTabIds] = useState<number[]>([]);
+  const [activeTabArmed, setActiveTabArmed] = useState<boolean>(true);
+  const [activeTabCapturable, setActiveTabCapturable] = useState<boolean>(false);
 
   const syncFromBackground = useCallback((state: {
     recordingState: RecordingState;
@@ -100,6 +102,39 @@ function App() {
     });
   }, [focusMode, recordingState]);
 
+  // While a Focus recording is running, check whether the tab the user is
+  // currently viewing has been armed. Opening this popup is a browser-action
+  // invocation, so it grants the capture grant for the active tab — meaning the
+  // "Record this tab" button below can arm it with a single click.
+  const refreshActiveTabArming = useCallback(() => {
+    if ((recordingState !== 'recording' && recordingState !== 'paused') || !focusMode) {
+      return;
+    }
+    chrome.tabs.query({ active: true, currentWindow: true }, ([activeTab]) => {
+      if (chrome.runtime.lastError || !activeTab?.id) {
+        return;
+      }
+      setActiveTabCapturable(isCapturableTab(activeTab));
+      chrome.runtime.sendMessage({ type: 'GET_TAB_ARMED', tabId: activeTab.id }, (resp) => {
+        if (chrome.runtime.lastError) {
+          return;
+        }
+        setActiveTabArmed(Boolean(resp?.armed));
+      });
+    });
+  }, [recordingState, focusMode]);
+
+  useEffect(() => {
+    refreshActiveTabArming();
+  }, [refreshActiveTabArming]);
+
+  const handleArmCurrentTab = () => {
+    chrome.runtime.sendMessage({ type: 'ARM_CURRENT_TAB' }, () => {
+      setActiveTabArmed(true);
+      setTimeout(refreshActiveTabArming, 300);
+    });
+  };
+
   const handleToggleTabSelection = (tabId: number) => {
     setSelectedTabIds((prev) =>
       prev.includes(tabId) ? prev.filter((id) => id !== tabId) : [...prev, tabId]
@@ -125,17 +160,17 @@ function App() {
     let startingTabId: number | undefined;
 
     if (focusMode) {
+      // Opening this popup grants the extension an activeTab capture grant for
+      // the CURRENT tab only. Chrome will not let us capture any other tab until
+      // the user invokes the extension on it (the Alt+Shift+F shortcut or the
+      // right-click "Add this tab to Focus recording" menu), so all we require
+      // here is that the tab being viewed is recordable.
       const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-      if (!activeTab?.id || !selectedTabIds.includes(activeTab.id)) {
+      if (!activeTab?.id || !isCapturableTab(activeTab)) {
         setError(
-          'Switch to one of the selected tabs before starting. Focus 1-1 records the tab you are viewing.'
+          'Open a recordable http/https tab and view it before starting. Focus records the tab you are viewing.'
         );
-        return;
-      }
-
-      if (!isCapturableTab(activeTab)) {
-        setError('The active tab cannot be recorded. Open a regular http/https page first.');
         return;
       }
 
@@ -224,6 +259,8 @@ function App() {
       onStop={handleStopRecording}
       onPause={handlePauseRecording}
       onResume={handleResumeRecording}
+      showArmCurrentTab={focusMode && activeTabCapturable && !activeTabArmed}
+      onArmCurrentTab={handleArmCurrentTab}
       error={error}
       onDismissError={() => setError(null)}
       tabsList={tabsList}

@@ -24,6 +24,20 @@ export class TabFocusDetector {
     this.monitoredTabIds.clear();
   }
 
+  /**
+   * Adds a tab to the monitored set after the user has armed it (granting the
+   * activeTab capture grant). Subsequent switches to it are then automatic.
+   */
+  addTab(tabId: number): void {
+    if (tabId > 0) {
+      this.monitoredTabIds.add(tabId);
+    }
+  }
+
+  isMonitored(tabId: number): boolean {
+    return this.monitoredTabIds.has(tabId);
+  }
+
   private handleActivated = (info: { tabId: number; windowId: number }): void => {
     if (!this.enabled) {
       return;

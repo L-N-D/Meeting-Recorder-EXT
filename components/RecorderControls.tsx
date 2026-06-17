@@ -30,6 +30,8 @@ interface RecorderControlsProps {
   onStop: () => void;
   onPause: () => void;
   onResume: () => void;
+  showArmCurrentTab?: boolean;
+  onArmCurrentTab?: () => void;
   error: string | null;
   onDismissError?: () => void;
   micMeter?: React.ReactNode;
@@ -68,6 +70,8 @@ export const RecorderControls: React.FC<RecorderControlsProps> = ({
   onStop,
   onPause,
   onResume,
+  showArmCurrentTab = false,
+  onArmCurrentTab,
   error,
   onDismissError,
   micMeter,
@@ -147,7 +151,10 @@ export const RecorderControls: React.FC<RecorderControlsProps> = ({
 
             {focusMode && (
               <div className="focus-hint">
-                Records the tab you are viewing. Switch between selected tabs — recording follows automatically.
+                Start records the tab you are viewing now. To follow another tab while
+                recording, switch to it and press <strong>Alt+Shift+F</strong> (or right-click the
+                page → <strong>“Add this tab to Focus recording”</strong>). After a tab is added,
+                switching back to it is automatic.
               </div>
             )}
 
@@ -302,6 +309,23 @@ export const RecorderControls: React.FC<RecorderControlsProps> = ({
 
           {!isStarting && !isStopping && (
             <p className="recording-hint">Controls stay here in the extension popup.</p>
+          )}
+
+          {(isRecording || isPaused) && showArmCurrentTab && (
+            <div className="arm-tab-prompt">
+              <p className="arm-tab-text">
+                The tab you are viewing is not being recorded yet.
+              </p>
+              <button
+                type="button"
+                className="action-btn arm-tab-btn"
+                onClick={onArmCurrentTab}
+                id="btn-arm-tab"
+              >
+                <Icon icon={Focus} size={16} />
+                Record this tab
+              </button>
+            </div>
           )}
 
           <div className="recording-actions">

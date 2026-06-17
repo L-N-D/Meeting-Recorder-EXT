@@ -164,31 +164,31 @@ async function startCapture(message: {
     const systemAudioTrack = screenStream.getAudioTracks()[0];
     const micAudioTrack = micStream?.getAudioTracks()[0];
 
-    if (systemAudioTrack && micAudioTrack) {
-      mixResult = mixAudioStreams(screenStream, micStream, audioSettings);
+    // Focus mode captures tab audio via getUserMedia(chromeMediaSource:'tab'),
+    // which MUTES the tab's own playback at the source. We must always route
+    // that audio back to the speakers, otherwise the user hears nothing while
+    // recording. Full-screen capture (getDisplayMedia) is NOT muted, so there
+    // we only monitor when the user explicitly opted in (avoids double audio).
+    const shouldMonitorSystem = message.focusMode ? true : audioSettings.routeSystemToSpeakers;
+
+    if (systemAudioTrack || micAudioTrack) {
+      // Always route through the mixer so we get an AudioContext that can both
+      // feed the recorder and (when needed) play the system/tab audio aloud.
+      mixResult = mixAudioStreams(screenStream, micStream, {
+        ...audioSettings,
+        routeSystemToSpeakers: shouldMonitorSystem,
+      });
       if (mixResult?.mixedTrack) {
         finalStream.addTrack(mixResult.mixedTrack);
         mixAudioContext = mixResult.audioContext;
       }
 
-      additionalTracksToCleanup.push(systemAudioTrack, micAudioTrack);
-      micStream?.getTracks().forEach((track) => {
-        if (track !== micAudioTrack) {
-          additionalTracksToCleanup.push(track);
-        }
-      });
-    } else if (systemAudioTrack) {
-      finalStream.addTrack(systemAudioTrack);
+      if (systemAudioTrack) {
+        additionalTracksToCleanup.push(systemAudioTrack);
+      }
       if (micStream) {
         additionalTracksToCleanup.push(...micStream.getTracks());
       }
-    } else if (micAudioTrack) {
-      finalStream.addTrack(micAudioTrack);
-      micStream?.getTracks().forEach((track) => {
-        if (track !== micAudioTrack) {
-          additionalTracksToCleanup.push(track);
-        }
-      });
     } else if (micStream) {
       additionalTracksToCleanup.push(...micStream.getTracks());
     }

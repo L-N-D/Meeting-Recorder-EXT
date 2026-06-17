@@ -16,7 +16,17 @@ export default defineConfig({
       'activeTab',
       'scripting',
       'storage',
+      'contextMenus',
     ],
     host_permissions: ['<all_urls>'],
+    commands: {
+      'arm-focus-tab': {
+        suggested_key: {
+          default: 'Alt+Shift+F',
+          mac: 'Alt+Shift+F',
+        },
+        description: 'Add the current tab to the Focus recording',
+      },
+    },
   },
 });

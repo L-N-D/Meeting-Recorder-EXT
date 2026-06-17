@@ -28,8 +28,29 @@ let includeMic = false;
 let includeCam = false;
 let focusMode = false;
 let audioSettings: AudioMixSettings = { ...DEFAULT_AUDIO_SETTINGS };
-let selectedTabIds: number[] = [];
 let currentError: string | null = null;
+
+// The tab Focus recording started on. Chrome grants the activeTab capture grant
+// for this tab when the user opens the popup, so the service worker can mint a
+// capture stream id for it. Other tabs must be armed by the user (Alt+Shift+F
+// or the context menu) before they can be captured.
+let focusStartTabId: number | null = null;
+
+// The tab whose content is currently being drawn into the recording. Used to
+// tell each page's status bubble whether it is the one on screen.
+let currentSourceTabId: number | null = null;
+
+const ARM_MENU_ID = 'arm-focus-tab';
+
+function broadcastBubbleRefresh(): void {
+  chrome.tabs.query({}, (tabs) => {
+    for (const tab of tabs) {
+      if (tab.id != null && tab.id >= 0) {
+        chrome.tabs.sendMessage(tab.id, { type: 'BUBBLE_REFRESH' }).catch(() => undefined);
+      }
+    }
+  });
+}
 
 // ---- Side-channel resources --------------------------------------------------
 let cameraWindowId: number | null = null;
@@ -62,6 +83,8 @@ function armCaptureWatchdog(): void {
     currentError = 'Capture did not start. No source was selected, or the screen dialog was blocked. Please try again.';
     broadcastState();
     tabFocusDetector.stop();
+    currentSourceTabId = null;
+    broadcastBubbleRefresh();
     cleanupCamera();
     void closeOffscreenDocument();
   }, CAPTURE_START_TIMEOUT_MS);
@@ -92,6 +115,32 @@ function broadcastState(): void {
 export default defineBackground(() => {
   resetOffscreenReadyPromise();
 
+  // Context menu to arm the current tab for Focus recording. Created on install;
+  // it persists across service-worker restarts.
+  chrome.runtime.onInstalled.addListener(() => {
+    chrome.contextMenus.removeAll(() => {
+      chrome.contextMenus.create({
+        id: ARM_MENU_ID,
+        title: 'Add this tab to Focus recording',
+        contexts: ['page', 'action'],
+      });
+    });
+  });
+
+  chrome.contextMenus.onClicked.addListener((info, tab) => {
+    if (info.menuItemId === ARM_MENU_ID) {
+      armCurrentTab(tab);
+    }
+  });
+
+  // Keyboard shortcut (Alt+Shift+F) — invoking it grants the activeTab capture
+  // grant for the active tab, which is exactly what tabCapture needs.
+  chrome.commands.onCommand.addListener((command) => {
+    if (command === ARM_MENU_ID) {
+      armCurrentTab();
+    }
+  });
+
   // If the user closes the camera preview window manually, reflect it in state.
   chrome.windows.onRemoved.addListener((windowId) => {
     if (cameraWindowId !== null && windowId === cameraWindowId) {
@@ -108,7 +157,6 @@ export default defineBackground(() => {
         includeMic = message.includeMic;
         includeCam = message.includeCam;
         focusMode = message.focusMode ?? false;
-        selectedTabIds = message.selectedTabIds ?? [];
         audioSettings = message.audioSettings ?? { ...DEFAULT_AUDIO_SETTINGS };
         startRecordingFlow(message.startingTabId);
         sendResponse({ success: true });
@@ -137,6 +185,34 @@ export default defineBackground(() => {
         sendResponse(getStatusPayload());
         break;
 
+      // ---- Status bubble (content script) -------------------------------------
+      case 'GET_BUBBLE_STATUS': {
+        const senderTabId = _sender.tab?.id ?? null;
+        const senderUrl = _sender.tab?.url ?? '';
+        const focusActive =
+          (recordingState === 'recording' || recordingState === 'paused') && focusMode;
+        sendResponse({
+          active: focusActive,
+          paused: recordingState === 'paused',
+          duration,
+          armed: senderTabId != null && tabFocusDetector.isMonitored(senderTabId),
+          isCurrent: senderTabId != null && senderTabId === currentSourceTabId,
+          capturable: /^https?:\/\//i.test(senderUrl),
+        });
+        break;
+      }
+
+      case 'GET_TAB_ARMED':
+        sendResponse({ armed: tabFocusDetector.isMonitored(message.tabId) });
+        break;
+
+      case 'ARM_CURRENT_TAB':
+        // The popup was just opened (a browser-action invocation), so the active
+        // tab now has the capture grant — arming it will succeed.
+        armCurrentTab();
+        sendResponse({ success: true });
+        break;
+
       // ---- Events from the offscreen document ---------------------------------
       case 'OFFSCREEN_READY':
         resolveOffscreenReady();
@@ -148,9 +224,13 @@ export default defineBackground(() => {
         recordingState = 'recording';
         duration = 0;
         broadcastState();
-        if (focusMode && selectedTabIds.length > 0) {
-          tabFocusDetector.start(selectedTabIds);
+        if (focusMode && focusStartTabId) {
+          // Start monitoring with the initial tab; the user arms more tabs
+          // on demand via the shortcut / context menu.
+          tabFocusDetector.start([focusStartTabId]);
+          currentSourceTabId = focusStartTabId;
         }
+        broadcastBubbleRefresh();
         sendResponse({ success: true });
         break;
 
@@ -186,6 +266,8 @@ export default defineBackground(() => {
         duration = 0;
         broadcastState();
         tabFocusDetector.stop();
+        currentSourceTabId = null;
+        broadcastBubbleRefresh();
         cleanupCamera();
         void closeOffscreenDocument();
         sendResponse({ success: true });
@@ -228,8 +310,14 @@ async function ensureOffscreenDocument(): Promise<void> {
 
   await chrome.offscreen.createDocument({
     url: 'offscreen.html',
-    reasons: [chrome.offscreen.Reason.DISPLAY_MEDIA],
-    justification: 'Capture screen and mix audio tracks',
+    // DISPLAY_MEDIA/USER_MEDIA for capture; AUDIO_PLAYBACK so the document is
+    // allowed to play the captured tab audio aloud while recording.
+    reasons: [
+      chrome.offscreen.Reason.DISPLAY_MEDIA,
+      chrome.offscreen.Reason.USER_MEDIA,
+      chrome.offscreen.Reason.AUDIO_PLAYBACK,
+    ],
+    justification: 'Capture screen/tab, mix audio, and monitor audio to speakers',
   });
 
   await Promise.race([
@@ -256,6 +344,7 @@ async function closeOffscreenDocument(): Promise<void> {
 function startRecordingFlow(startingTabId?: number): void {
   recordingState = 'starting';
   currentError = null;
+  focusStartTabId = focusMode ? (startingTabId ?? null) : null;
   broadcastState();
 
   void (async () => {
@@ -265,7 +354,9 @@ function startRecordingFlow(startingTabId?: number): void {
       console.log(LOG, 'offscreen ready');
 
       // Focus 1-1 records a specific tab via tabCapture; full mode uses the
-      // system screen picker (handled inside the offscreen document).
+      // system screen picker (handled inside the offscreen document). The popup
+      // invocation grants the activeTab capture grant for the starting tab, so
+      // the service worker can mint its stream id here.
       let initialStreamId: string | null = null;
       if (focusMode && startingTabId) {
         initialStreamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: startingTabId });
@@ -332,7 +423,9 @@ function handleRecordingComplete(blobUrl: string, mimeType: string): void {
     recordingState = 'idle';
     duration = 0;
     currentError = error ?? null;
+    currentSourceTabId = null;
     broadcastState();
+    broadcastBubbleRefresh();
     cleanupCamera();
     void closeOffscreenDocument();
   };
@@ -415,13 +508,53 @@ async function switchRecordingSource(tabId: number): Promise<void> {
   }
 
   try {
+    // Works because the tab has been armed (activeTab capture grant) — either
+    // the starting tab via the popup, or another tab via the shortcut / menu.
     const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
     await chrome.runtime.sendMessage({ type: 'SWITCH_SOURCE', streamId, tabId });
+    currentSourceTabId = tabId;
+    broadcastBubbleRefresh();
   } catch (err) {
     const message = err instanceof Error ? err.message : 'capture unavailable';
     console.warn(LOG, 'could not switch tab:', message);
     currentError = `Could not switch to tab: ${message}`;
     broadcastState();
+  }
+}
+
+// ---- Arming tabs for Focus recording -----------------------------------------
+// tabCapture requires a per-tab activeTab grant, which Chrome only gives when
+// the user invokes the extension ON that tab. The keyboard command and context
+// menu are such invocations, so when they fire the active tab is capturable.
+
+const CAPTURABLE_TAB = /^https?:\/\//i;
+
+function armCurrentTab(tab?: chrome.tabs.Tab): void {
+  if (recordingState !== 'recording' && recordingState !== 'paused') {
+    currentError = 'Start a Focus recording first, then arm tabs to follow.';
+    broadcastState();
+    return;
+  }
+
+  if (!focusMode) {
+    return;
+  }
+
+  const resolve = (resolved?: chrome.tabs.Tab) => {
+    if (!resolved?.id || !resolved.url || !CAPTURABLE_TAB.test(resolved.url)) {
+      currentError = 'This tab cannot be recorded (only http/https pages).';
+      broadcastState();
+      return;
+    }
+    tabFocusDetector.addTab(resolved.id);
+    currentError = null;
+    void switchRecordingSource(resolved.id);
+  };
+
+  if (tab) {
+    resolve(tab);
+  } else {
+    chrome.tabs.query({ active: true, currentWindow: true }, ([activeTab]) => resolve(activeTab));
   }
 }
 
