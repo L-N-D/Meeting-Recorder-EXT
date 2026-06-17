@@ -79,22 +79,30 @@ async function captureTabStream(streamId: string, withAudio: boolean): Promise<M
     },
   } as MediaTrackConstraints;
 
+  // Tab audio must use the SAME chromeMediaSource/streamId as the video — it is
+  // NOT `audio: true` (that requests the default microphone, an invalid combo
+  // with a tab video source that throws on Windows and aborts the recording).
+  const audioConstraints = {
+    mandatory: {
+      chromeMediaSource: 'tab',
+      chromeMediaSourceId: streamId,
+    },
+  } as MediaTrackConstraints;
+
   if (withAudio) {
     try {
       return await navigator.mediaDevices.getUserMedia({
-        audio: true,
+        audio: audioConstraints,
         video: videoConstraints,
       } as MediaStreamConstraints);
     } catch (err: any) {
-      if (err.name === 'NotFoundError' || err.message?.includes('not found')) {
-        console.warn('Tab audio unavailable, capturing video only:', err.message);
-        chrome.runtime.sendMessage({
-          type: 'RECORDING_WARNING',
-          warning: 'Tab audio unavailable. Recording video only from this tab.',
-        });
-      } else {
-        throw err;
-      }
+      // Any audio failure (tab has no audio, OS-specific error names, etc.)
+      // must degrade to video-only rather than killing the whole capture.
+      console.warn('Tab audio unavailable, capturing video only:', err?.name, err?.message);
+      chrome.runtime.sendMessage({
+        type: 'RECORDING_WARNING',
+        warning: 'Tab audio unavailable. Recording video only from this tab.',
+      });
     }
   }
 
