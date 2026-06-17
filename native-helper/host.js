@@ -15,3 +15,13 @@ const createVirtualSink = () => {
     })
 }
 
+const listVirtualSinks = () => {
+    exec(
+        "pactl list sink-inputs short",
+        (err, stdout) => {
+            console.log(stdout);
+        }
+    );
+}
+// createVirtualSink();
+listVirtualSinks();
