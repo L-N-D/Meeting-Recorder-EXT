@@ -1,53 +1,64 @@
+import { ChunkStorage } from './chunkStorage';
+import { fixWebmDuration } from './webmDurationFix';
+
 /**
  * Helper class to manage the MediaRecorder lifecycle, chunk collection,
  * and media track cleanup.
  */
 export class ScreenRecorder {
   private mediaRecorder: MediaRecorder | null = null;
-  private chunks: Blob[] = [];
+  private chunkStorage = new ChunkStorage();
   private onBlobReady: (blob: Blob) => void;
   private onTimeUpdate: (seconds: number) => void;
   private onError: (error: Error) => void;
-  
-  private startTime: number = 0;
-  private timerInterval: any = null;
+  private onStateChange: (state: 'recording' | 'paused') => void;
+
+  private startTime = 0;
+  private pausedAt = 0;
+  private totalPausedMs = 0;
+  private timerInterval: ReturnType<typeof setInterval> | null = null;
   private tracksToCleanup: MediaStreamTrack[] = [];
   private audioContextToCleanup: AudioContext | null = null;
+  private recordedMimeType = 'video/webm';
 
   constructor(options: {
     onBlobReady: (blob: Blob) => void;
     onTimeUpdate: (seconds: number) => void;
     onError: (error: Error) => void;
+    onStateChange?: (state: 'recording' | 'paused') => void;
   }) {
     this.onBlobReady = options.onBlobReady;
     this.onTimeUpdate = options.onTimeUpdate;
     this.onError = options.onError;
+    this.onStateChange = options.onStateChange ?? (() => undefined);
   }
 
-  /**
-   * Starts recording the given MediaStream.
-   * 
-   * @param stream The final mixed MediaStream containing the video track and mixed audio track.
-   * @param additionalTracks Media tracks (e.g., source tracks before mixing) that must be stopped on cleanup.
-   * @param audioContext AudioContext that must be closed on cleanup.
-   */
-  public start(
+  public async start(
     stream: MediaStream,
     additionalTracks: MediaStreamTrack[] = [],
     audioContext: AudioContext | null = null
-  ) {
-    this.chunks = [];
+  ): Promise<void> {
     this.tracksToCleanup = [...stream.getTracks(), ...additionalTracks];
     this.audioContextToCleanup = audioContext;
+    this.startTime = Date.now();
+    this.pausedAt = 0;
+    this.totalPausedMs = 0;
 
-    // Prioritized list of MIME types (preferring MP4/H.264 formats for local playback compatibility)
+    try {
+      await this.chunkStorage.init();
+    } catch (err) {
+      this.onError(new Error(`Failed to initialize chunk storage: ${(err as Error).message}`));
+      this.cleanup();
+      return;
+    }
+
     const candidates = [
       'video/mp4;codecs=h264,aac',
       'video/mp4;codecs=h264,opus',
       'video/mp4',
       'video/webm;codecs=vp9,opus',
       'video/webm;codecs=vp8,opus',
-      'video/webm'
+      'video/webm',
     ];
 
     let selectedType = '';
@@ -59,15 +70,16 @@ export class ScreenRecorder {
     }
 
     try {
-      console.log('Starting MediaRecorder with mimeType:', selectedType || 'default');
       const options = selectedType ? { mimeType: selectedType } : {};
       this.mediaRecorder = new MediaRecorder(stream, options);
-    } catch (e: any) {
-      console.error('Failed to initialize MediaRecorder with candidate types, falling back to default:', e);
+      this.recordedMimeType = this.mediaRecorder.mimeType || selectedType || 'video/webm';
+    } catch {
       try {
         this.mediaRecorder = new MediaRecorder(stream);
-      } catch (err: any) {
-        this.onError(new Error(`Failed to initialize MediaRecorder: ${err.message}`));
+        this.recordedMimeType = this.mediaRecorder.mimeType || 'video/webm';
+      } catch (fallbackErr: any) {
+        this.onError(new Error(`Failed to initialize MediaRecorder: ${fallbackErr.message}`));
+        await this.chunkStorage.cleanup();
         this.cleanup();
         return;
       }
@@ -75,78 +87,113 @@ export class ScreenRecorder {
 
     this.mediaRecorder.ondataavailable = (event) => {
       if (event.data && event.data.size > 0) {
-        this.chunks.push(event.data);
+        this.chunkStorage.appendChunk(event.data).catch((storageErr) => {
+          console.error('Failed to persist recording chunk:', storageErr);
+          this.onError(new Error('Failed to persist recording chunk'));
+          this.stop();
+        });
       }
     };
 
     this.mediaRecorder.onstop = () => {
-      const mimeType = this.mediaRecorder?.mimeType || 'video/webm';
-      const finalBlob = new Blob(this.chunks, { type: mimeType });
-      this.onBlobReady(finalBlob);
-      this.cleanup();
+      void this.finalizeRecording();
     };
 
     this.mediaRecorder.onerror = (event: any) => {
       this.onError(event.error || new Error('MediaRecorder encountered an error'));
+      void this.chunkStorage.cleanup();
       this.cleanup();
     };
 
-    // Start recording, collecting data in 1-second chunks
     this.mediaRecorder.start(1000);
-    this.startTime = Date.now();
+    this.onStateChange('recording');
 
-    // Start duration timer
     this.timerInterval = setInterval(() => {
-      const elapsedSeconds = Math.floor((Date.now() - this.startTime) / 1000);
+      const elapsedSeconds = Math.floor(this.getElapsedMs() / 1000);
       this.onTimeUpdate(elapsedSeconds);
     }, 1000);
   }
 
-  /**
-   * Stops the current recording.
-   */
-  public stop() {
+  public pause(): void {
+    if (this.mediaRecorder?.state === 'recording') {
+      this.mediaRecorder.pause();
+      this.pausedAt = Date.now();
+      this.onStateChange('paused');
+    }
+  }
+
+  public resume(): void {
+    if (this.mediaRecorder?.state === 'paused') {
+      this.mediaRecorder.resume();
+      if (this.pausedAt > 0) {
+        this.totalPausedMs += Date.now() - this.pausedAt;
+        this.pausedAt = 0;
+      }
+      this.onStateChange('recording');
+    }
+  }
+
+  public stop(): void {
     if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
       this.mediaRecorder.stop();
     } else {
+      void this.chunkStorage.cleanup();
       this.cleanup();
     }
   }
 
-  /**
-   * Forces cleanup of all streams, tracks, contexts, and timers.
-   */
-  public cleanup() {
-    // Clear timer
+  public cleanup(): void {
     if (this.timerInterval) {
       clearInterval(this.timerInterval);
       this.timerInterval = null;
     }
 
-    // Stop all media tracks to release hardware locks
     this.tracksToCleanup.forEach((track) => {
       try {
         if (track.readyState !== 'ended') {
           track.stop();
         }
-      } catch (e) {
-        console.error('Failed to stop media track', e);
+      } catch (err) {
+        console.error('Failed to stop media track', err);
       }
     });
     this.tracksToCleanup = [];
 
-    // Close AudioContext
     if (this.audioContextToCleanup) {
       try {
         if (this.audioContextToCleanup.state !== 'closed') {
           this.audioContextToCleanup.close();
         }
-      } catch (e) {
-        console.error('Failed to close AudioContext', e);
+      } catch (err) {
+        console.error('Failed to close AudioContext', err);
       }
       this.audioContextToCleanup = null;
     }
 
     this.mediaRecorder = null;
+  }
+
+  private getElapsedMs(): number {
+    let pausedMs = this.totalPausedMs;
+    if (this.pausedAt > 0) {
+      pausedMs += Date.now() - this.pausedAt;
+    }
+    return Math.max(0, Date.now() - this.startTime - pausedMs);
+  }
+
+  private async finalizeRecording(): Promise<void> {
+    const mimeType = this.recordedMimeType;
+    const durationMs = this.getElapsedMs();
+
+    try {
+      let finalBlob = await this.chunkStorage.assembleBlob(mimeType);
+      finalBlob = await fixWebmDuration(finalBlob, durationMs);
+      this.onBlobReady(finalBlob);
+    } catch (err) {
+      this.onError(new Error(`Failed to finalize recording: ${(err as Error).message}`));
+    } finally {
+      await this.chunkStorage.cleanup();
+      this.cleanup();
+    }
   }
 }

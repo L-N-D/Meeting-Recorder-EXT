@@ -1,18 +1,22 @@
 import { defineConfig } from 'wxt';
 
-// See https://wxt.dev/api/config.html
 export default defineConfig({
   outDir: 'dist',
   modules: ['@wxt-dev/module-react'],
   manifest: {
     name: 'Screen Recorder',
-    description: 'A simple Chrome Extension for screen recording and audio mixing.',
-    version: '1.0.0',
+    description: 'A Chrome Extension for screen recording with Focus 1-1 and audio mixing.',
+    version: '2.0.0',
     permissions: [
       'offscreen',
       'desktopCapture',
+      'tabCapture',
+      'tabs',
       'downloads',
-      'activeTab'
-    ]
-  }
+      'activeTab',
+      'scripting',
+      'storage',
+    ],
+    host_permissions: ['<all_urls>'],
+  },
 });

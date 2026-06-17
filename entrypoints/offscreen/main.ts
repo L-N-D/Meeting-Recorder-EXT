@@ -1,70 +1,90 @@
 import { mixAudioStreams } from '../../utils/audioMixer';
+import { CanvasRouter } from '../../utils/canvasRouter';
 import { ScreenRecorder } from '../../utils/recording';
+import { DEFAULT_AUDIO_SETTINGS, type AudioMixSettings } from '../../utils/types';
 
 let recorder: ScreenRecorder | null = null;
+let canvasRouter: CanvasRouter | null = null;
 let currentBlobUrl: string | null = null;
+let screenStream: MediaStream | null = null;
+let micStream: MediaStream | null = null;
+let mixAudioContext: AudioContext | null = null;
 
-// Initialize the recorder
+chrome.runtime.sendMessage({ type: 'OFFSCREEN_READY' }).catch(() => undefined);
+
 recorder = new ScreenRecorder({
   onBlobReady: (blob) => {
-    // Revoke previous URL to prevent memory leaks
     if (currentBlobUrl) {
       URL.revokeObjectURL(currentBlobUrl);
     }
     currentBlobUrl = URL.createObjectURL(blob);
-    
-    // Notify background script to trigger download
+
     chrome.runtime.sendMessage({
       type: 'RECORDING_COMPLETE',
       url: currentBlobUrl,
-      mimeType: blob.type
+      mimeType: blob.type,
     });
   },
   onTimeUpdate: (seconds) => {
     chrome.runtime.sendMessage({
       type: 'RECORDING_TICK',
-      duration: seconds
+      duration: seconds,
     });
   },
   onError: (error) => {
     console.error('Offscreen recording error:', error);
     chrome.runtime.sendMessage({
       type: 'RECORDING_ERROR',
-      error: error.message
+      error: error.message,
     });
-  }
+  },
+  onStateChange: (state) => {
+    chrome.runtime.sendMessage({
+      type: state === 'paused' ? 'RECORDING_PAUSED' : 'RECORDING_RESUMED',
+    });
+  },
 });
 
-// Listen to control commands from background service worker
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'START_RECORDING') {
-    startCapture(message);
-    sendResponse({ success: true });
-  } else if (message.type === 'STOP_RECORDING') {
-    stopCapture();
-    sendResponse({ success: true });
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  switch (message.type) {
+    case 'START_RECORDING':
+      void startCapture(message);
+      sendResponse({ success: true });
+      break;
+    case 'STOP_RECORDING':
+      stopCapture();
+      sendResponse({ success: true });
+      break;
+    case 'PAUSE_RECORDING':
+      recorder?.pause();
+      sendResponse({ success: true });
+      break;
+    case 'RESUME_RECORDING':
+      recorder?.resume();
+      sendResponse({ success: true });
+      break;
+    case 'SWITCH_SOURCE':
+      void switchSource(message.streamId);
+      sendResponse({ success: true });
+      break;
   }
   return true;
 });
 
-/**
- * Capture screen and optional mic, mix audio, and start recording.
- */
 async function startCapture(message: {
   includeMic: boolean;
-}) {
-  let screenStream: MediaStream | null = null;
-  let micStream: MediaStream | null = null;
+  focusMode?: boolean;
+  audioSettings?: AudioMixSettings;
+}): Promise<void> {
+  const audioSettings = message.audioSettings ?? DEFAULT_AUDIO_SETTINGS;
   let mixResult: ReturnType<typeof mixAudioStreams> = null;
 
   try {
-    // 1. Get the screen capture stream directly (this will display Chrome's native picker)
     screenStream = await navigator.mediaDevices.getDisplayMedia({
       video: true,
-      audio: true
+      audio: true,
     });
 
-    // 2. Get the microphone stream if requested
     if (message.includeMic) {
       try {
         micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -72,104 +92,129 @@ async function startCapture(message: {
         console.warn('Microphone access denied or unavailable:', err);
         chrome.runtime.sendMessage({
           type: 'RECORDING_WARNING',
-          warning: 'Microphone could not be accessed. Recording without microphone.'
+          warning: 'Microphone could not be accessed. Recording without microphone.',
         });
       }
     }
 
-    // 3. Construct final stream for MediaRecorder
     const videoTrack = screenStream.getVideoTracks()[0];
     if (!videoTrack) {
       throw new Error('No video track found in screen capture stream');
     }
 
-    const finalStream = new MediaStream([videoTrack]);
+    canvasRouter = new CanvasRouter({ width: 1920, height: 1080, fps: 30 });
+    canvasRouter.setActiveSource(new MediaStream([videoTrack]));
+
+    const finalStream = new MediaStream([...canvasRouter.getOutputStream().getVideoTracks()]);
     const additionalTracksToCleanup: MediaStreamTrack[] = [];
 
     const systemAudioTrack = screenStream.getAudioTracks()[0];
     const micAudioTrack = micStream?.getAudioTracks()[0];
 
-    // Determine audio configuration based on available sources
     if (systemAudioTrack && micAudioTrack) {
-      // Both streams are present -> Mix them using Web Audio API
-      mixResult = mixAudioStreams(screenStream, micStream);
-      if (mixResult && mixResult.mixedTrack) {
+      mixResult = mixAudioStreams(screenStream, micStream, audioSettings);
+      if (mixResult?.mixedTrack) {
         finalStream.addTrack(mixResult.mixedTrack);
+        mixAudioContext = mixResult.audioContext;
       }
-      
-      // Clean up source tracks because finalStream uses the mixed track
-      additionalTracksToCleanup.push(systemAudioTrack);
-      additionalTracksToCleanup.push(micAudioTrack);
-      if (micStream) {
-        micStream.getTracks().forEach(track => {
-          if (track !== micAudioTrack) {
-            additionalTracksToCleanup.push(track);
-          }
-        });
-      }
+
+      additionalTracksToCleanup.push(systemAudioTrack, micAudioTrack);
+      micStream?.getTracks().forEach((track) => {
+        if (track !== micAudioTrack) {
+          additionalTracksToCleanup.push(track);
+        }
+      });
     } else if (systemAudioTrack) {
-      // Only system audio is present -> Record natively without mixing
       finalStream.addTrack(systemAudioTrack);
       if (micStream) {
         additionalTracksToCleanup.push(...micStream.getTracks());
       }
     } else if (micAudioTrack) {
-      // Only microphone is present -> Record natively without mixing
       finalStream.addTrack(micAudioTrack);
-      if (micStream) {
-        micStream.getTracks().forEach(track => {
-          if (track !== micAudioTrack) {
-            additionalTracksToCleanup.push(track);
-          }
-        });
-      }
-    } else {
-      // No audio available
-      if (micStream) {
-        additionalTracksToCleanup.push(...micStream.getTracks());
-      }
+      micStream?.getTracks().forEach((track) => {
+        if (track !== micAudioTrack) {
+          additionalTracksToCleanup.push(track);
+        }
+      });
+    } else if (micStream) {
+      additionalTracksToCleanup.push(...micStream.getTracks());
     }
 
-    // 4. Start MediaRecorder
-    recorder?.start(
-      finalStream,
-      additionalTracksToCleanup,
-      mixResult?.audioContext || null
-    );
+    await recorder?.start(finalStream, additionalTracksToCleanup, mixResult?.audioContext ?? null);
 
-    // Watch for screen sharing being stopped by the user via Chrome native floating bar
+    chrome.runtime.sendMessage({ type: 'CAPTURE_STARTED' });
+
     videoTrack.onended = () => {
       console.log('Video track ended (user stopped sharing)');
       stopCapture();
     };
-
   } catch (err: any) {
     console.error('Error starting capture in offscreen:', err);
-    
-    const isCancellation = err.name === 'NotAllowedError' || err.message?.includes('Permission denied');
+
+    const isCancellation =
+      err.name === 'NotAllowedError' || err.message?.includes('Permission denied');
     chrome.runtime.sendMessage({
       type: 'RECORDING_ERROR',
-      error: isCancellation ? 'Recording cancelled' : (err.message || 'Failed to start screen capture')
+      error: isCancellation ? 'Recording cancelled' : err.message || 'Failed to start screen capture',
     });
 
-    // Cleanup any partially opened streams
-    if (screenStream) {
-      screenStream.getTracks().forEach(t => t.stop());
-    }
-    if (micStream) {
-      micStream.getTracks().forEach(t => t.stop());
-    }
-    if (mixResult && mixResult.audioContext) {
-      mixResult.audioContext.close().catch(console.error);
-    }
+    cleanupPartialCapture(mixResult?.audioContext ?? null);
   }
 }
 
-/**
- * Stops the capture.
- */
-function stopCapture() {
-  if (recorder) {
-    recorder.stop();
+async function switchSource(streamId: string): Promise<void> {
+  if (!canvasRouter || !streamId) {
+    return;
   }
+
+  try {
+    const newStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        mandatory: {
+          chromeMediaSource: 'tab',
+          chromeMediaSourceId: streamId,
+        },
+      },
+    } as MediaStreamConstraints);
+
+    canvasRouter.setActiveSource(newStream);
+  } catch (err) {
+    console.warn('Failed to switch canvas source:', err);
+  }
+}
+
+function stopCapture(): void {
+  recorder?.stop();
+  cleanupCaptureResources();
+}
+
+function cleanupPartialCapture(audioContext: AudioContext | null): void {
+  screenStream?.getTracks().forEach((track) => track.stop());
+  micStream?.getTracks().forEach((track) => track.stop());
+  screenStream = null;
+  micStream = null;
+
+  canvasRouter?.destroy();
+  canvasRouter = null;
+
+  audioContext?.close().catch(console.error);
+  mixAudioContext = null;
+}
+
+function cleanupCaptureResources(): void {
+  screenStream?.getTracks().forEach((track) => {
+    if (track.readyState !== 'ended') {
+      track.stop();
+    }
+  });
+  micStream?.getTracks().forEach((track) => track.stop());
+  screenStream = null;
+  micStream = null;
+
+  canvasRouter?.destroy();
+  canvasRouter = null;
+
+  mixAudioContext?.close().catch(console.error);
+  mixAudioContext = null;
 }

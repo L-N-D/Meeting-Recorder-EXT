@@ -1,16 +1,24 @@
 import { useState, useEffect } from 'react';
+import { MicLevelMeter } from '../../components/MicLevelMeter';
 import { RecorderControls } from '../../components/RecorderControls';
+import {
+  DEFAULT_AUDIO_SETTINGS,
+  type AudioMixSettings,
+  type RecordingState,
+} from '../../utils/types';
 
 function App() {
-  const [recordingState, setRecordingState] = useState<'idle' | 'starting' | 'recording'>('idle');
+  const [recordingState, setRecordingState] = useState<RecordingState>('idle');
   const [duration, setDuration] = useState<number>(0);
   const [includeMic, setIncludeMic] = useState<boolean>(true);
   const [includeCam, setIncludeCam] = useState<boolean>(false);
+  const [focusMode, setFocusMode] = useState<boolean>(false);
+  const [audioSettings, setAudioSettings] = useState<AudioMixSettings>({
+    ...DEFAULT_AUDIO_SETTINGS,
+  });
   const [error, setError] = useState<string | null>(null);
 
-  // Sync state with background script on mount and listen for broadcasts
   useEffect(() => {
-    // 1. Fetch initial status from background service worker
     chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATUS' }, (response) => {
       if (chrome.runtime.lastError) {
         console.error('Failed to get recording status:', chrome.runtime.lastError);
@@ -21,11 +29,12 @@ function App() {
         setDuration(response.duration);
         setIncludeMic(response.includeMic);
         setIncludeCam(response.includeCam);
+        setFocusMode(response.focusMode ?? false);
+        setAudioSettings(response.audioSettings ?? { ...DEFAULT_AUDIO_SETTINGS });
         setError(response.error);
       }
     });
 
-    // 2. Listen to state changes broadcasted by background worker
     const handleMessage = (message: any) => {
       if (message.type === 'STATE_CHANGED' && message.state) {
         setRecordingState(message.state.recordingState);
@@ -33,55 +42,78 @@ function App() {
         setError(message.state.error);
         setIncludeMic(message.state.includeMic);
         setIncludeCam(message.state.includeCam);
+        setFocusMode(message.state.focusMode ?? false);
+        setAudioSettings(message.state.audioSettings ?? { ...DEFAULT_AUDIO_SETTINGS });
       }
     };
 
     chrome.runtime.onMessage.addListener(handleMessage);
-    
+
     return () => {
       chrome.runtime.onMessage.removeListener(handleMessage);
     };
   }, []);
 
+  const sendStartRecording = () => {
+    chrome.runtime.sendMessage(
+      {
+        type: 'START_RECORDING_FLOW',
+        includeMic,
+        includeCam,
+        focusMode,
+        audioSettings,
+      },
+      () => {
+        if (chrome.runtime.lastError) {
+          setError(`Failed to connect to background worker: ${chrome.runtime.lastError.message}`);
+          setRecordingState('idle');
+        }
+      }
+    );
+  };
+
   const handleStartRecording = async () => {
     setError(null);
     setRecordingState('starting');
 
-    // Check if permissions are already granted using the Permissions API
     let micGranted = true;
     let camGranted = true;
 
     try {
       if (includeMic) {
-        const res = await navigator.permissions.query({ name: 'microphone' as any });
+        const res = await navigator.permissions.query({ name: 'microphone' as PermissionName });
         micGranted = res.state === 'granted';
       }
       if (includeCam) {
-        const res = await navigator.permissions.query({ name: 'camera' as any });
+        const res = await navigator.permissions.query({ name: 'camera' as PermissionName });
         camGranted = res.state === 'granted';
       }
-    } catch (e) {
-      // Fallback: If query is unsupported or fails, check via prompt tab
+    } catch {
       micGranted = false;
       camGranted = false;
     }
 
-    // If any selected permission is not granted, open the onboarding permissions tab
     if ((includeMic && !micGranted) || (includeCam && !camGranted)) {
-      chrome.tabs.create({
-        url: `permissions.html?mic=${includeMic}&cam=${includeCam}`
+      chrome.runtime.sendMessage({
+        type: 'SET_PENDING_RECORDING',
+        includeMic,
+        includeCam,
+        focusMode,
+        audioSettings,
       });
-      window.close(); // Close transient popup so user can focus on the tab
+
+      chrome.tabs.create({
+        url: `permissions.html?mic=${includeMic}&cam=${includeCam}&focus=${focusMode}`,
+      });
+      window.close();
       return;
     }
 
-    // If permissions are already granted, run a hardware check to ensure devices are connected
     if (includeMic) {
       try {
         const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
         micStream.getTracks().forEach((track) => track.stop());
       } catch (err: any) {
-        console.warn('Microphone hardware check failed:', err);
         if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
           setError('Microphone device not found. Please connect a microphone or uncheck "Include Microphone".');
         } else {
@@ -97,7 +129,6 @@ function App() {
         const camStream = await navigator.mediaDevices.getUserMedia({ video: true });
         camStream.getTracks().forEach((track) => track.stop());
       } catch (err: any) {
-        console.warn('Camera hardware check failed:', err);
         if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
           setError('Camera device not found. Please connect a webcam or uncheck "Include Camera".');
         } else {
@@ -108,24 +139,23 @@ function App() {
       }
     }
 
-    chrome.runtime.sendMessage({
-      type: 'START_RECORDING_FLOW',
-      includeMic,
-      includeCam
-    }, (response) => {
-      if (chrome.runtime.lastError) {
-        setError(`Failed to connect to background worker: ${chrome.runtime.lastError.message}`);
-        setRecordingState('idle');
-      }
-    });
+    sendStartRecording();
   };
 
   const handleStopRecording = () => {
-    chrome.runtime.sendMessage({ type: 'STOP_RECORDING_FLOW' }, (response) => {
+    chrome.runtime.sendMessage({ type: 'STOP_RECORDING_FLOW' }, () => {
       if (chrome.runtime.lastError) {
         setError(`Failed to stop recording: ${chrome.runtime.lastError.message}`);
       }
     });
+  };
+
+  const handlePauseRecording = () => {
+    chrome.runtime.sendMessage({ type: 'PAUSE_RECORDING_FLOW' });
+  };
+
+  const handleResumeRecording = () => {
+    chrome.runtime.sendMessage({ type: 'RESUME_RECORDING_FLOW' });
   };
 
   return (
@@ -134,11 +164,18 @@ function App() {
       duration={duration}
       includeMic={includeMic}
       includeCam={includeCam}
+      focusMode={focusMode}
+      audioSettings={audioSettings}
       onToggleMic={() => setIncludeMic(!includeMic)}
       onToggleCam={() => setIncludeCam(!includeCam)}
+      onToggleFocusMode={() => setFocusMode(!focusMode)}
+      onAudioSettingsChange={setAudioSettings}
       onStart={handleStartRecording}
       onStop={handleStopRecording}
+      onPause={handlePauseRecording}
+      onResume={handleResumeRecording}
       error={error}
+      micMeter={<MicLevelMeter enabled={includeMic && recordingState === 'idle'} />}
     />
   );
 }
