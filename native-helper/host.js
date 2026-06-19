@@ -45,7 +45,10 @@ const DEFAULT_SINK_NAME = 'Virtual-EXT_rec';
 /** Sanitize a human label into a PulseAudio sink_name (extension provides the label). */
 function sanitizeSinkName(name) {
   const raw = String(name ?? '').trim().toLowerCase();
-  // Extension already sends deriveSinkName() values like "virtual-ext_entire_screen".
+  // Extension already sends deriveSinkName() values like "Virtual-EXT_entire_screen".
+  if (/^virtual-ext_[a-z0-9_]+$/.test(raw)) {
+    return `Virtual-EXT_${raw.slice('virtual-ext_'.length)}`.slice(0, 48);
+  }
   if (/^virtual_[a-z0-9_]+$/.test(raw)) {
     return raw.slice(0, 48);
   }
@@ -310,6 +313,21 @@ class PipeWireManager {
     return this.discoverPorts(sinkNodeId, 'in');
   }
 
+  /** Monitor output ports of a sink (tap everything playing on that sink). */
+  async discoverSinkMonitorPorts(sinkName) {
+    const objs = await this.dump();
+    let sinkNodeId = null;
+    for (const o of objs) {
+      const props = o?.info?.props;
+      if (props && props['media.class'] === 'Audio/Sink' && props['node.name'] === sinkName) {
+        sinkNodeId = o.id;
+        break;
+      }
+    }
+    if (sinkNodeId == null) return [];
+    return this.discoverPorts(sinkNodeId, 'out');
+  }
+
   /**
    * Create channel-matched links output→input. FL→FL, FR→FR; mono fans out to all.
    * @param {Array<{id:number, channel:string}>} outPorts
@@ -399,6 +417,8 @@ class AudioManager {
     this.chromeCaptureSource = chromeCaptureSourceName(DEFAULT_SINK_NAME);
     /** @type {Map<number, {pid:number, nodeIds:number[], links:Array}>} keyed by pid */
     this.mirrors = new Map();
+    /** Default output sink monitor → virtual sink (Entire Screen system-wide tap). */
+    this.defaultOutputMirror = null;
   }
 
   _deviceInfo(pulseSources = []) {
@@ -639,6 +659,68 @@ class AudioManager {
     }));
   }
 
+  async _getDefaultPulseSink() {
+    const { stdout } = await run('pactl', ['get-default-sink']);
+    const name = stdout.trim();
+    if (!name) {
+      throw new HostError(ErrorCode.DEVICE_NOT_READY, 'Could not resolve default PulseAudio sink');
+    }
+    return name;
+  }
+
+  /**
+   * Tap the default output sink monitor and link it into the virtual sink.
+   * Captures all system audio without moving playback away from the real speakers.
+   */
+  async mirrorDefaultOutputMonitor(opts = {}) {
+    await this.createVirtualDevice(opts);
+
+    const { stdout: sinkInputsRaw } = await run('pactl', ['list', 'short', 'sink-inputs'], {
+      allowFail: true,
+    });
+    const sinkInputLines = sinkInputsRaw.split('\n').filter((l) => l.trim());
+    log.info('mirrorDefaultOutput: sink-inputs', {
+      count: sinkInputLines.length,
+      preview: sinkInputLines.slice(0, 8),
+    });
+
+    const defaultSink = await this._getDefaultPulseSink();
+    log.info('mirrorDefaultOutput: default sink', { defaultSink, targetSink: this.sinkName });
+
+    if (this.defaultOutputMirror?.links?.length) {
+      await this.pw.removeLinks(this.defaultOutputMirror.links);
+      this.defaultOutputMirror = null;
+    }
+
+    const monitorOutPorts = await this.pw.discoverSinkMonitorPorts(defaultSink);
+    const virtualInPorts = await this.pw.discoverSinkInputPorts(this.sinkName);
+    if (!monitorOutPorts.length) {
+      throw new HostError(
+        ErrorCode.DEVICE_NOT_READY,
+        `Default sink "${defaultSink}" has no monitor output ports`
+      );
+    }
+    if (!virtualInPorts.length) {
+      throw new HostError(ErrorCode.DEVICE_NOT_READY, 'Virtual sink is not ready (no input ports)');
+    }
+
+    log.info('mirrorDefaultOutput: ports', {
+      monitorOut: monitorOutPorts.map((p) => ({ id: p.id, ch: p.channel, name: p.name })),
+      virtualIn: virtualInPorts.map((p) => ({ id: p.id, ch: p.channel, name: p.name })),
+    });
+
+    const links = await this.pw.createLinks(monitorOutPorts, virtualInPorts);
+    log.info('mirrorDefaultOutput: links created', { defaultSink, targetSink: this.sinkName, links });
+
+    this.defaultOutputMirror = { sourceSink: defaultSink, links };
+    return {
+      sourceSink: defaultSink,
+      targetSink: this.sinkName,
+      linksCreated: links.length,
+      links,
+    };
+  }
+
   /**
    * Mirror every audio stream belonging to `pid` into the virtual sink.
    * @param {number} pid
@@ -705,13 +787,33 @@ class AudioManager {
 
   /**
    * Mirror every currently-playing audio stream into the virtual sink.
+   * Entire Screen: default output monitor tap first, then per-app streams.
    */
   async mirrorAllApplications(opts = {}) {
-    await this.createVirtualDevice(opts);
+    let defaultOutput = { sourceSink: null, targetSink: null, linksCreated: 0, error: null };
+    try {
+      defaultOutput = await this.mirrorDefaultOutputMonitor(opts);
+    } catch (err) {
+      log.warn('mirrorAllApplications: default output mirror failed', { err: err.message });
+      defaultOutput = {
+        sourceSink: null,
+        targetSink: this.sinkName,
+        linksCreated: 0,
+        error: err.message,
+      };
+    }
+
     const nodes = await this.pw.discoverNodes();
+    log.info('mirrorAllApplications: Stream/Output/Audio', {
+      count: nodes.length,
+      streams: nodes.map((n) => ({ pid: n.pid, name: n.appName || n.name, nodeId: n.id })),
+    });
+
     const results = [];
+    const seenPids = new Set();
     for (const node of nodes) {
-      if (!node.pid) continue;
+      if (!node.pid || seenPids.has(node.pid)) continue;
+      seenPids.add(node.pid);
       try {
         const r = await this.mirrorApplication(node.pid);
         results.push(r);
@@ -719,8 +821,12 @@ class AudioManager {
         log.warn('mirrorAll: skipping node', { nodeId: node.id, pid: node.pid, err: err.message });
       }
     }
-    log.info('mirrorAllApplications done', { mirrored: results.length });
-    return { mirrored: results.length, results };
+
+    log.info('mirrorAllApplications done', {
+      defaultLinks: defaultOutput.linksCreated ?? 0,
+      appMirrored: results.length,
+    });
+    return { mirrored: results.length, defaultOutput, results };
   }
 
   /** Remove the mirror for a pid, or all mirrors when pid is omitted. */
@@ -728,6 +834,18 @@ class AudioManager {
     const targets = pid != null ? [pid] : [...this.mirrors.keys()];
     let removed = 0;
     let failures = 0;
+
+    if (pid == null && this.defaultOutputMirror?.links?.length) {
+      const res = await this.pw.removeLinks(this.defaultOutputMirror.links);
+      removed += res.removed;
+      failures += res.failures;
+      log.info('stopMirror: default output links removed', {
+        sourceSink: this.defaultOutputMirror.sourceSink,
+        removed: res.removed,
+      });
+      this.defaultOutputMirror = null;
+    }
+
     for (const p of targets) {
       const mirror = this.mirrors.get(p);
       if (!mirror) continue;
@@ -814,6 +932,12 @@ class AudioManager {
         nodeIds: m.nodeIds,
         links: m.links.length,
       })),
+      defaultOutputMirror: this.defaultOutputMirror
+        ? {
+            sourceSink: this.defaultOutputMirror.sourceSink,
+            links: this.defaultOutputMirror.links.length,
+          }
+        : null,
     };
   }
 

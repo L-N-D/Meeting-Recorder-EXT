@@ -891,27 +891,49 @@ async function autoMirrorByWindowTitle(
  */
 async function autoMirrorAllStreams(opts: { sessionName: string; sinkName: string }): Promise<void> {
   try {
-    const apps = await nativeAudio.listApplications();
-    if (!apps.length) {
-      bgLog('info', 'autoMirrorAllStreams: no active audio streams found');
-      return;
+    let discovered: Awaited<ReturnType<typeof nativeAudio.listApplications>> = [];
+    try {
+      discovered = await nativeAudio.listApplications();
+      bgLog(
+        'info',
+        `autoMirrorAllStreams: discovered ${discovered.length} Stream/Output/Audio node(s)` +
+          (discovered.length
+            ? `: ${discovered.map((a) => `${a.name}(pid ${a.pid})`).join(', ')}`
+            : '')
+      );
+    } catch (err) {
+      bgLog('warn', `autoMirrorAllStreams: listApplications failed: ${describeNativeError(err)}`);
     }
-    for (const app of apps) {
-      if (app.pid == null) continue;
-      try {
-        const result = await nativeAudio.mirrorApplicationAudio(app.pid, opts);
-        const session: AudioSession = {
-          pid: result.pid,
-          name: app.name,
-          nodeIds: result.nodeIds,
-          linksCreated: result.linksCreated,
-        };
-        addMirror(session);
-        bgLog('info', `auto-mirrored ${app.name} (pid ${app.pid}), links: ${result.linksCreated}`);
-      } catch (err) {
-        bgLog('warn', `autoMirrorAllStreams: skipping ${app.name} (pid ${app.pid}): ${describeNativeError(err)}`);
-      }
+
+    const result = await nativeAudio.mirrorAllApplications(opts);
+    const { defaultOutput, mirrored, results } = result;
+
+    if (defaultOutput.linksCreated > 0) {
+      bgLog(
+        'info',
+        `autoMirrorAllStreams: default output mirrored (${defaultOutput.sourceSink} → ${opts.sinkName}), links=${defaultOutput.linksCreated}`
+      );
+    } else if (defaultOutput.error) {
+      bgLog('warn', `autoMirrorAllStreams: default output mirror failed: ${defaultOutput.error}`);
+    } else {
+      bgLog('warn', 'autoMirrorAllStreams: default output mirror created 0 links');
     }
+
+    for (const r of results) {
+      const app = discovered.find((a) => a.pid === r.pid);
+      addMirror({
+        pid: r.pid,
+        name: app?.name ?? `pid ${r.pid}`,
+        nodeIds: r.nodeIds,
+        linksCreated: r.linksCreated,
+      });
+      bgLog('info', `auto-mirrored app pid ${r.pid}, links: ${r.linksCreated}`);
+    }
+
+    bgLog(
+      'info',
+      `autoMirrorAllStreams done: defaultLinks=${defaultOutput.linksCreated}, appMirrored=${mirrored}`
+    );
   } catch (err) {
     bgLog('warn', `autoMirrorAllStreams failed: ${describeNativeError(err)}`);
   }

@@ -108,6 +108,19 @@ export interface MirrorResult {
   monitorSource: string;
 }
 
+export interface DefaultOutputMirrorResult {
+  sourceSink: string | null;
+  targetSink?: string | null;
+  linksCreated: number;
+  error?: string | null;
+}
+
+export interface MirrorAllResult {
+  mirrored: number;
+  defaultOutput: DefaultOutputMirrorResult;
+  results: MirrorResult[];
+}
+
 type Pending = {
   resolve: (value: unknown) => void;
   reject: (reason: NativeError) => void;
@@ -245,8 +258,11 @@ export class NativeAudioBridge {
   }
 
   /** Mirror every currently-playing audio stream into the virtual sink. */
-  mirrorAllApplications(): Promise<{ mirrored: number; results: MirrorResult[] }> {
-    return this.send('mirrorAllApplications');
+  mirrorAllApplications(opts?: {
+    sessionName?: string;
+    sinkName?: string;
+  }): Promise<MirrorAllResult> {
+    return this.send('mirrorAllApplications', opts ?? {});
   }
 
   stopMirror(pid?: number): Promise<unknown> {
