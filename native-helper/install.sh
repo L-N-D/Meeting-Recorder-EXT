@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Register the Dzi Record native messaging host with every Chromium-based
+# Register the Virtual-EXT Record native messaging host with every Chromium-based
 # browser found on this machine. Re-run any time the absolute path changes.
 set -euo pipefail
 
-HOST_NAME="com.dzi.record_audio"
+HOST_NAME="com.virtual_ext.record_audio"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LAUNCHER="$HERE/run-host.sh"
 

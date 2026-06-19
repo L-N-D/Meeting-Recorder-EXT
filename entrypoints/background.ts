@@ -1,5 +1,5 @@
 /**
- * Background Service Worker — Dzi Recorder
+ * Background Service Worker — EXT Recorder
  * =========================================
  *
  * Single source of truth for all recording state and the native audio session.
@@ -790,7 +790,7 @@ function handleDisplaySurfaceDetected(surface: string, sourceLabel?: string): vo
           `pactl sources: ${result.pulseSources.map((s) => `${s.name}#${s.index}[${s.state}]`).join(', ')}`
         );
       } else {
-        bgLog('warn', 'pactl: no dzi sources listed');
+        bgLog('warn', 'pactl: no virtual audio sources listed');
       }
 
       try {

@@ -255,7 +255,7 @@ export default function App() {
     <div className="sp-root">
       {/* Header */}
       <header className="sp-header">
-        <span className="sp-title">Dzi Recorder</span>
+        <span className="sp-title">EXT Recorder</span>
         {(recordingState === 'recording' || recordingState === 'paused') && (
           <span className="sp-header-timer">
             <span className={`sp-dot ${recordingState === 'recording' ? 'sp-dot--pulse' : 'sp-dot--paused'}`} />

@@ -1,5 +1,5 @@
 /**
- * NativeAudioBridge — typed client for the Dzi Record native messaging host
+ * NativeAudioBridge — typed client for the Virtual-EXT Record native messaging host
  * (native-helper/host.js).
  *
  * Uses a PERSISTENT port (`chrome.runtime.connectNative`) rather than one-shot
@@ -9,7 +9,7 @@
  * clean, leak-free lifecycle.
  */
 
-export const NATIVE_HOST_NAME = 'com.dzi.record_audio';
+export const NATIVE_HOST_NAME = 'com.virtual_ext.record_audio';
 
 export interface NativeError {
   code: string;

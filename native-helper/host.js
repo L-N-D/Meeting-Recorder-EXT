@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 /**
- * Dzi Record — Native Messaging Host
- * ==================================
+ * Virtual-EXT Record — Native Messaging Host
+ * ==========================================
  *
  * Mirrors the audio of a specific Linux application into a virtual audio device
  * WITHOUT moving / muting / changing the user's current output.
  *
  *   Application ──┬──> Real speaker / headphone   (original link, untouched)
- *                 └──> dzi_record_sink            (extra link we add = the mirror)
+ *                 └──> virtual_ext_record_sink            (extra link we add = the mirror)
  *                            │
- *                            └──> dzi_record_sink.monitor  (internal PipeWire monitor)
+ *                            └──> virtual_ext_record_sink.monitor  (internal PipeWire monitor)
  *                                      │
- *                                      └──> dzi_record_sink_mic  (module-remap-source)
+ *                                      └──> virtual_ext_record_sink_mic  (module-remap-source)
  *                                                │
  *                                                └──> Chrome getUserMedia (audioinput)
  *
@@ -40,13 +40,13 @@ const execFileAsync = promisify(execFile);
 const HOST_VERSION = '1.1.0';
 
 const DEFAULT_SESSION_NAME = 'Recording';
-const DEFAULT_SINK_NAME = 'dzi_rec';
+const DEFAULT_SINK_NAME = 'Virtual-EXT_rec';
 
 /** Sanitize a human label into a PulseAudio sink_name (extension provides the label). */
 function sanitizeSinkName(name) {
   const raw = String(name ?? '').trim().toLowerCase();
-  // Extension already sends deriveSinkName() values like "dzi_entire_screen".
-  if (/^dzi_[a-z0-9_]+$/.test(raw)) {
+  // Extension already sends deriveSinkName() values like "virtual-ext_entire_screen".
+  if (/^virtual_[a-z0-9_]+$/.test(raw)) {
     return raw.slice(0, 48);
   }
   const slug = raw
@@ -55,7 +55,7 @@ function sanitizeSinkName(name) {
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
     .slice(0, 44);
-  return `dzi_${slug || 'rec'}`;
+  return `Virtual-EXT_${slug || 'rec'}`;
 }
 
 /** Chrome-visible remap source name derived from sink_name. */
@@ -76,12 +76,12 @@ class Logger {
   constructor() {
     this.logFile = null;
     try {
-      const dir = join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'dzi-record');
+      const dir = join(process.env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'Virtual-EXT-record');
       mkdirSync(dir, { recursive: true });
       this.logFile = join(dir, 'native-host.log');
     } catch {
       try {
-        this.logFile = join(tmpdir(), 'dzi-record-native-host.log');
+        this.logFile = join(tmpdir(), 'Virtual-EXT-record-native-host.log');
       } catch {
         this.logFile = null;
       }
@@ -117,7 +117,7 @@ class Logger {
     this._write('ERROR', msg, extra);
   }
   debug(msg, extra) {
-    if (process.env.DZI_DEBUG) this._write('DEBUG', msg, extra);
+    if (process.env.EXT_REC_DEBUG) this._write('DEBUG', msg, extra);
   }
 }
 
@@ -535,7 +535,7 @@ class AudioManager {
       if (!line.trim()) continue;
       const [idx, name, ...rest] = line.split('\t');
       const args = rest.join(' ');
-      if (name === 'module-remap-source' && /source_name=dzi_/.test(args)) {
+      if (name === 'module-remap-source' && /source_name=Virtual-EXT_/.test(args)) {
         if (!captureSource || args.includes(`source_name=${captureSource}`)) {
           toUnload.push(idx);
         }
@@ -759,7 +759,7 @@ class AudioManager {
         if (!line.trim()) continue;
         const [idx, name, ...rest] = line.split('\t');
         const args = rest.join(' ');
-        if (name === 'module-remap-source' && /source_name=dzi_/.test(args)) {
+        if (name === 'module-remap-source' && /source_name=Virtual-EXT_/.test(args)) {
           remapUnload.push(idx);
         }
       }
@@ -774,7 +774,7 @@ class AudioManager {
       errors.push(String(err));
     }
 
-    // 3. Unload ALL dzi_* null-sink modules (current + leftovers from prior sessions).
+    // 3. Unload ALL Virtual-EXT_* null-sink modules (current + leftovers from prior sessions).
     try {
       const { stdout } = await run('pactl', ['list', 'short', 'modules'], { allowFail: true });
       const toUnload = [];
@@ -782,7 +782,7 @@ class AudioManager {
         if (!line.trim()) continue;
         const [idx, name, ...rest] = line.split('\t');
         const args = rest.join(' ');
-        if (name === 'module-null-sink' && /sink_name=dzi_/.test(args)) {
+        if (name === 'module-null-sink' && /sink_name=Virtual-EXT_/.test(args)) {
           toUnload.push(idx);
         }
       }
@@ -844,7 +844,7 @@ class AudioManager {
         if (!props) continue;
         const nodeName = props['node.name'] || '';
         const mediaName = props['media.name'] || '';
-        if (!nodeName.includes('dzi_') && !mediaName.includes('dzi_')) continue;
+        if (!nodeName.includes('Virtual-EXT_') && !mediaName.includes('Virtual-EXT_')) continue;
         pwNodes.push({
           id: o.id,
           nodeName,

@@ -1,6 +1,6 @@
 {
-  "name": "com.dzi.record_audio",
-  "description": "Dzi Record — native audio mirror host (PipeWire/PulseAudio)",
+  "name": "com.virtual_ext.record_audio",
+  "description": "Virtual-EXT Record — native audio mirror host (PipeWire/PulseAudio)",
   "path": "__HOST_PATH__",
   "type": "stdio",
   "allowed_origins": [

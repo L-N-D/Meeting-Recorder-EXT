@@ -15,7 +15,7 @@ if [ -z "$NODE_BIN" ]; then
   done
 fi
 if [ -z "$NODE_BIN" ]; then
-  echo "dzi-record native host: node not found in PATH" >&2
+  echo "virtual-ext-record native host: node not found in PATH" >&2
   exit 1
 fi
 
@@ -28,4 +28,5 @@ export XDG_RUNTIME_DIR
 : "${DBUS_SESSION_BUS_ADDRESS:=unix:path=${XDG_RUNTIME_DIR}/bus}"
 export DBUS_SESSION_BUS_ADDRESS
 
-exec "$NODE_BIN" "$HERE/host.js"
+exec "$NODE_BIN" "$HERE/host.js" 2>> "/home/intern-lnduy/.local/state/Virtual-EXT-record/stderr.log"
+

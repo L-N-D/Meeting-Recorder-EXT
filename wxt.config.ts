@@ -4,9 +4,9 @@ export default defineConfig({
   outDir: 'dist',
   modules: ['@wxt-dev/module-react'],
   manifest: {
-    name: 'Dzi Recorder',
+    name: 'EXT Recorder',
     description: 'Screen, tab and application recorder with native Linux audio mirror support.',
-    version: '3.0.0',
+    version: '2.2.0',
     // Fixed public key → deterministic extension id
     // (plmehkdmfenfighdnboaknnolkpngdpb) so the native messaging host's
     // allowed_origins stays valid across reloads. See native-helper/.
@@ -29,7 +29,7 @@ export default defineConfig({
     // (configured in background.ts via chrome.sidePanel.setPanelBehavior).
     // No default_popup so the action button is purely a panel toggle.
     action: {
-      default_title: 'Dzi Recorder',
+      default_title: 'EXT Recorder',
     },
     side_panel: {
       default_path: 'sidepanel.html',

@@ -21,7 +21,7 @@ interface BubbleStatus {
   capturable: boolean;
 }
 
-const HOST_ID = 'dzi-focus-bubble-host';
+const HOST_ID = 'virtual-ext-focus-bubble-host';
 
 export default defineContentScript({
   matches: ['http://*/*', 'https://*/*'],

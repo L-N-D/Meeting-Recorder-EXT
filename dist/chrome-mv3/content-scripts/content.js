@@ -1,4 +1,4 @@
-var content=(function(){function e(e){return e}var t=`dzi-focus-bubble-host`,n=e({matches:[`http://*/*`,`https://*/*`],runAt:`document_idle`,allFrames:!1,main(){let e=null,n=null,r=null,i=e=>{let t=Math.max(0,Math.floor(e)),n=Math.floor(t/3600),r=Math.floor(t%3600/60),i=t%60,a=e=>String(e).padStart(2,`0`);return n>0?`${a(n)}:${a(r)}:${a(i)}`:`${a(r)}:${a(i)}`};function a(){return n||(e=document.createElement(`div`),e.id=t,e.style.cssText=`all: initial; position: fixed; z-index: 2147483647;`,n=e.attachShadow({mode:`open`}),n.innerHTML=`
+var content=(function(){function e(e){return e}var t=`virtual-ext-focus-bubble-host`,n=e({matches:[`http://*/*`,`https://*/*`],runAt:`document_idle`,allFrames:!1,main(){let e=null,n=null,r=null,i=e=>{let t=Math.max(0,Math.floor(e)),n=Math.floor(t/3600),r=Math.floor(t%3600/60),i=t%60,a=e=>String(e).padStart(2,`0`);return n>0?`${a(n)}:${a(r)}:${a(i)}`:`${a(r)}:${a(i)}`};function a(){return n||(e=document.createElement(`div`),e.id=t,e.style.cssText=`all: initial; position: fixed; z-index: 2147483647;`,n=e.attachShadow({mode:`open`}),n.innerHTML=`
         <style>
           :host { all: initial; }
           .bubble {

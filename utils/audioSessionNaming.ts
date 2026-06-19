@@ -16,7 +16,7 @@ export function deriveSinkName(sessionName: string): string {
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '')
     .slice(0, MAX_SINK_SLUG_LEN);
-  return `dzi_${slug || 'rec'}`;
+  return `Virtual-EXT_${slug || 'rec'}`;
 }
 
 /**
@@ -48,7 +48,7 @@ export function isOpaqueWindowLabel(label: string): boolean {
 export function isAvoidDeviceLabel(label: string, sessionName: string): boolean {
   const l = label.toLowerCase();
   const s = sessionName.toLowerCase();
-  if (!l.includes(s) && !l.includes('dzi')) return false;
+  if (!l.includes(s) && !l.includes('Virtual-EXT')) return false;
   return l.startsWith('mirror of ');
 }
 
@@ -60,7 +60,7 @@ export function scoreDeviceLabel(
 ): number {
   const l = label.toLowerCase();
   const s = sessionName.toLowerCase();
-  const slug = (sinkName ?? '').toLowerCase().replace(/^dzi_/, '');
+  const slug = (sinkName ?? '').toLowerCase().replace(/^Virtual-EXT_/, '');
 
   if (isAvoidDeviceLabel(label, sessionName)) return 5;
 
@@ -70,8 +70,8 @@ export function scoreDeviceLabel(
   if (l.startsWith('monitor of ') && l.includes(s)) return 80;
   if (l.includes(s) && !l.includes('mirror of')) return 85;
   if (l.includes(s)) return 55;
-  if (sinkName && l.includes('dzi') && !l.includes('mirror of') && !l.includes('monitor of')) return 45;
-  if (l.includes('dzi') && !l.includes('mirror of') && !l.includes('monitor of')) return 40;
-  if (l.includes('dzi')) return 15;
+  if (sinkName && l.includes('Virtual-EXT') && !l.includes('mirror of') && !l.includes('monitor of')) return 45;
+  if (l.includes('Virtual-EXT') && !l.includes('mirror of') && !l.includes('monitor of')) return 40;
+  if (l.includes('Virtual-EXT')) return 15;
   return 0;
 }

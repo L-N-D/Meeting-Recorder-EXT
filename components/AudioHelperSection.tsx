@@ -58,7 +58,7 @@ export function AudioHelperSection({ appAudio }: AudioHelperSectionProps) {
           (r: { pulseName: string; index: number; isMonitor: boolean; chromeVisible: boolean }) =>
             `${r.pulseName} → Chrome ${r.chromeVisible ? 'visible' : 'hidden'}${r.isMonitor ? ' (monitor)' : ''}`
         );
-        setDiagnosis(lines.join('\n') || 'No dzi sources in pactl');
+        setDiagnosis(lines.join('\n') || 'No virtual sources in pactl');
       } else {
         setLocalError(resp?.error ?? 'Diagnose failed');
       }
