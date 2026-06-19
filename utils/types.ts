@@ -1,4 +1,20 @@
-export type RecordingState = 'idle' | 'starting' | 'recording' | 'paused';
+export type RecordingState = 'idle' | 'starting' | 'recording' | 'paused' | 'interrupted';
+
+export interface ActiveSessionMetadata {
+  sessionId: string;
+  startTime: number;
+  mimeType: string;
+  duration: number;
+  focusMode: boolean;
+  includeMic: boolean;
+  includeCam: boolean;
+  isActive: boolean;
+  status: 'recording' | 'paused' | 'crashed' | 'completed';
+  lastChunkTime: number;
+  lastUpdateTime: number;
+  chunkCount: number;
+  captureSource?: string;
+}
 
 export interface AudioMixSettings {
   systemGain: number;

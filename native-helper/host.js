@@ -919,6 +919,47 @@ class AudioManager {
     return { cleaned: true };
   }
 
+  /** Unload all Virtual-EXT_ modules left over from previous crashed sessions. */
+  async cleanupStaleModules() {
+    log.info('cleaning up stale modules on startup');
+    let errors = [];
+
+    try {
+      const { stdout } = await run('pactl', ['list', 'short', 'modules'], { allowFail: true });
+      const remapUnload = [];
+      const sinkUnload = [];
+      for (const line of stdout.split('\n')) {
+        if (!line.trim()) continue;
+        const [idx, name, ...rest] = line.split('\t');
+        const args = rest.join(' ');
+        if (name === 'module-remap-source' && /source_name=Virtual-EXT_/.test(args)) {
+          remapUnload.push(idx);
+        } else if (name === 'module-null-sink' && /sink_name=Virtual-EXT_/.test(args)) {
+          sinkUnload.push(idx);
+        }
+      }
+      
+      for (const idx of remapUnload) {
+        await run('pactl', ['unload-module', idx], { allowFail: true });
+      }
+      for (const idx of sinkUnload) {
+        await run('pactl', ['unload-module', idx], { allowFail: true });
+      }
+      
+      if (remapUnload.length || sinkUnload.length) {
+        log.info('startup cleanup removed stale modules', {
+          remaps: remapUnload.length,
+          sinks: sinkUnload.length,
+        });
+      }
+    } catch (err) {
+      errors.push(String(err));
+      log.warn('startup cleanup encountered errors', { err: String(err) });
+    }
+    
+    return { cleaned: true, errors };
+  }
+
   status() {
     return {
       sink: this.sinkName,
@@ -1082,6 +1123,12 @@ class NativeHost {
 
   start() {
     log.info('native host starting', { version: HOST_VERSION, pid: process.pid });
+    
+    // Purge any stale PulseAudio modules left over from a previous crash.
+    this.audio.cleanupStaleModules().catch(err => {
+      log.warn('startup cleanup failed', { err: String(err) });
+    });
+
     process.stdin.on('data', (chunk) => this._onData(chunk));
     process.stdin.on('end', () => this._shutdown('stdin-end'));
     process.stdin.on('error', (err) => {

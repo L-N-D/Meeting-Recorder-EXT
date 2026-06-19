@@ -11,6 +11,8 @@ import {
 import { CanvasRouter } from '../../utils/canvasRouter';
 import { ScreenRecorder } from '../../utils/recording';
 import { DEFAULT_AUDIO_SETTINGS, type AudioMixSettings } from '../../utils/types';
+import { StreamHealthMonitor, type StreamHealthEvent } from '../../utils/streamHealthMonitor';
+import { AudioHealthMonitor, type AudioHealthEvent } from '../../utils/audioHealthMonitor';
 
 let recorder: ScreenRecorder | null = null;
 let canvasRouter: CanvasRouter | null = null;
@@ -23,6 +25,9 @@ let mixAudioContext: AudioContext | null = null;
 let detectedSurface: string | undefined;
 /** audioinput deviceIds present before native sink creation — for diff matching. */
 let baselineAudioDeviceIds = new Set<string>();
+
+let streamMonitor: StreamHealthMonitor | null = null;
+let audioMonitor: AudioHealthMonitor | null = null;
 
 chrome.runtime.sendMessage({ type: 'OFFSCREEN_READY' }).catch(() => undefined);
 
@@ -52,6 +57,12 @@ recorder = new ScreenRecorder({
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   switch (message.type) {
+    case 'OFFSCREEN_PING':
+      sendResponse({
+        state: recorder?.getState() || 'inactive',
+        duration: recorder?.getDurationSec() || 0
+      });
+      break;
     case 'START_RECORDING':
       void startCapture(message);
       sendResponse({ success: true });
@@ -75,6 +86,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // We switch the app-audio stream to use the virtual device.
     case 'ATTACH_APP_AUDIO':
       void attachAppAudio(message.captureTarget as VirtualCaptureTarget);
+      sendResponse({ success: true });
+      break;
+    case 'FALLBACK_TO_DISPLAY_MEDIA':
+      void fallbackToDisplayMedia();
       sendResponse({ success: true });
       break;
   }
@@ -357,6 +372,9 @@ async function startCapture(message: {
   focusMode?: boolean;
   audioSettings?: AudioMixSettings;
   initialStreamId?: string;
+  sessionId?: string;
+  isContinuation?: boolean;
+  initialDuration?: number;
 }): Promise<void> {
   const audioSettings = message.audioSettings ?? DEFAULT_AUDIO_SETTINGS;
   let mixResult: ReturnType<typeof mixAudioStreams> = null;
@@ -443,6 +461,19 @@ async function startCapture(message: {
     const finalStream = new MediaStream([...canvasRouter.getOutputStream().getVideoTracks()]);
     const additionalTracksToCleanup: MediaStreamTrack[] = [];
 
+    streamMonitor = new StreamHealthMonitor((event, trackId) => {
+      chrome.runtime.sendMessage({ type: 'STREAM_HEALTH_EVENT', event, trackId }).catch(() => undefined);
+      if (event === 'VIDEO_SOURCE_LOST' || event === 'VIDEO_FROZEN') {
+        canvasRouter?.switchToPlaceholder('Video Source Lost');
+      }
+    });
+    
+    audioMonitor = new AudioHealthMonitor((event, trackId) => {
+      chrome.runtime.sendMessage({ type: 'AUDIO_HEALTH_EVENT', event, trackId }).catch(() => undefined);
+    });
+
+    streamMonitor.setVideoTrack(videoTrack);
+
     // For window/monitor: ONLY the mirror sink stream — never display-media or default mic.
     const useMirrorSink = isNativeMirrorSurface(detectedSurface);
     const systemAudioTrack = useMirrorSink
@@ -453,6 +484,15 @@ async function startCapture(message: {
     // Focus mode captures tab audio via getUserMedia(chromeMediaSource:'tab'),
     // which MUTES the tab's own playback at the source — always monitor it.
     const shouldMonitorSystem = message.focusMode ? true : audioSettings.routeSystemToSpeakers;
+
+    if (systemAudioTrack) {
+      streamMonitor?.addAudioTrack(systemAudioTrack);
+      audioMonitor?.addTrack(systemAudioTrack);
+    }
+    if (micAudioTrack) {
+      streamMonitor?.addAudioTrack(micAudioTrack);
+      audioMonitor?.addTrack(micAudioTrack);
+    }
 
     if (systemAudioTrack || micAudioTrack) {
       mixResult = mixAudioStreams(
@@ -473,7 +513,14 @@ async function startCapture(message: {
       additionalTracksToCleanup.push(...micStream.getTracks());
     }
 
-    await recorder?.start(finalStream, additionalTracksToCleanup, mixResult?.audioContext ?? null);
+    await recorder?.start(
+      finalStream,
+      additionalTracksToCleanup,
+      mixResult?.audioContext ?? null,
+      message.sessionId,
+      message.isContinuation ?? false,
+      message.initialDuration ?? 0
+    );
     const hasAudio = finalStream.getAudioTracks().length > 0;
     console.log(
       '[offscreen] recorder started → CAPTURE_STARTED',
@@ -481,10 +528,6 @@ async function startCapture(message: {
     );
     chrome.runtime.sendMessage({ type: 'CAPTURE_STARTED' });
 
-    videoTrack.onended = () => {
-      console.log('[offscreen] video track ended (user stopped sharing)');
-      void stopCapture();
-    };
   } catch (err: any) {
     console.error('[offscreen] startCapture error:', err);
     const isCancellation =
@@ -500,6 +543,49 @@ async function startCapture(message: {
 
     chrome.runtime.sendMessage({ type: 'RECORDING_ERROR', error: errorMessage });
     cleanupPartialCapture(mixResult?.audioContext ?? null);
+  }
+}
+
+async function fallbackToDisplayMedia(): Promise<void> {
+  try {
+    console.log('[offscreen] fallback to display media…');
+    const newStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: true,
+    });
+
+    const videoTrack = newStream.getVideoTracks()[0];
+    if (!videoTrack) throw new Error('No video track found in fallback stream');
+
+    detectedSurface = (videoTrack.getSettings() as any).displaySurface as string | undefined;
+    const sourceLabel = videoTrack.label?.trim() || undefined;
+    console.log('[offscreen] fallback displaySurface:', detectedSurface, 'label:', sourceLabel);
+
+    chrome.runtime
+      .sendMessage({
+        type: 'DISPLAY_SURFACE_DETECTED',
+        surface: detectedSurface ?? 'unknown',
+        sourceLabel,
+      })
+      .catch(() => undefined);
+
+    if (isNativeMirrorSurface(detectedSurface)) {
+      for (const t of newStream.getAudioTracks()) {
+        console.log('[offscreen] dropping fallback display-media audio track (using mirror sink)');
+        t.stop();
+      }
+    }
+
+    canvasRouter?.setActiveSource(newStream);
+    streamMonitor?.setVideoTrack(videoTrack);
+
+    chrome.runtime.sendMessage({ type: 'SOURCE_FALLBACK_SUCCESS' }).catch(() => undefined);
+  } catch (err: any) {
+    console.error('[offscreen] fallback to display media failed:', err);
+    chrome.runtime.sendMessage({
+      type: 'RECORDING_WARNING',
+      warning: `Failed to fallback: ${err.message || 'permission denied'}`
+    }).catch(() => undefined);
   }
 }
 
@@ -531,6 +617,12 @@ function cleanupPartialCapture(audioContext: AudioContext | null): void {
   appAudioStream = null;
   detectedSurface = undefined;
   baselineAudioDeviceIds = new Set();
+  
+  streamMonitor?.destroy();
+  streamMonitor = null;
+  audioMonitor?.destroy();
+  audioMonitor = null;
+
   canvasRouter?.destroy();
   canvasRouter = null;
   audioContext?.close().catch(console.error);
@@ -548,6 +640,12 @@ function cleanupCaptureResources(): void {
   appAudioStream = null;
   detectedSurface = undefined;
   baselineAudioDeviceIds = new Set();
+  
+  streamMonitor?.destroy();
+  streamMonitor = null;
+  audioMonitor?.destroy();
+  audioMonitor = null;
+
   canvasRouter?.destroy();
   canvasRouter = null;
   mixAudioContext?.close().catch(console.error);

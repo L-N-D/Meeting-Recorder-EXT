@@ -21,6 +21,7 @@ export class CanvasRouter {
   private activeStream: MediaStream | null = null;
   private destroyed = false;
   private fps: number;
+  private placeholderMessage: string | null = null;
 
   constructor(options: CanvasRouterOptions = {}) {
     const width = options.width ?? 1920;
@@ -66,6 +67,19 @@ export class CanvasRouter {
     }
   }
 
+  switchToPlaceholder(message: string): void {
+    if (this.destroyed) return;
+    this.placeholderMessage = message;
+    
+    if (this.activeStream) {
+      this.activeStream.getVideoTracks().forEach((track) => {
+        if (track.readyState !== 'ended') track.stop();
+      });
+      this.activeStream = null;
+    }
+    this.videoElement.srcObject = null;
+  }
+
   getOutputStream(): MediaStream {
     return this.outputStream;
   }
@@ -106,6 +120,7 @@ export class CanvasRouter {
       this.activeStream.getVideoTracks().forEach((track) => track.stop());
       this.activeStream = null;
     }
+    this.placeholderMessage = null;
 
     this.videoElement.srcObject = null;
     this.outputStream.getTracks().forEach((track) => track.stop());
@@ -117,7 +132,16 @@ export class CanvasRouter {
       if (this.destroyed) {
         return;
       }
-      if (this.activeStream && this.videoElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      
+      if (this.placeholderMessage) {
+        this.ctx.fillStyle = '#000000';
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        this.ctx.fillStyle = '#FFFFFF';
+        this.ctx.font = '48px sans-serif';
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = 'middle';
+        this.ctx.fillText(this.placeholderMessage, this.canvas.width / 2, this.canvas.height / 2);
+      } else if (this.activeStream && this.videoElement.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
         this.ctx.drawImage(this.videoElement, 0, 0, this.canvas.width, this.canvas.height);
       }
     }, intervalMs);

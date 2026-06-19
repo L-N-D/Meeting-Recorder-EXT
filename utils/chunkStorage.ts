@@ -11,8 +11,8 @@ export class ChunkStorage {
   private DB_NAME = 'RecordExtensionDB';
   private STORE_NAME = 'chunks';
 
-  async init(): Promise<void> {
-    this.sessionId = `session-${Date.now()}`;
+  async init(customSessionId?: string): Promise<void> {
+    this.sessionId = customSessionId || `session-${Date.now()}`;
     this.chunkCount = 0;
 
     return new Promise((resolve, reject) => {
@@ -36,6 +36,50 @@ export class ChunkStorage {
         reject(request.error || new Error('Failed to open IndexedDB'));
       };
     });
+  }
+
+  async initExisting(sessionId: string): Promise<void> {
+    this.sessionId = sessionId;
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(this.DB_NAME, 1);
+
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(this.STORE_NAME)) {
+          db.createObjectStore(this.STORE_NAME);
+        }
+      };
+
+      request.onsuccess = () => {
+        this.db = request.result;
+        const transaction = this.db.transaction(this.STORE_NAME, 'readonly');
+        const store = transaction.objectStore(this.STORE_NAME);
+        const range = IDBKeyRange.bound(`${sessionId}-0`, `${sessionId}-\uffff`);
+        const countRequest = store.count(range);
+
+        countRequest.onsuccess = () => {
+          this.chunkCount = countRequest.result;
+          console.log(`[chunkStorage] Loaded existing session ${sessionId} with ${this.chunkCount} chunks`);
+          resolve();
+        };
+
+        countRequest.onerror = () => {
+          reject(countRequest.error || new Error('Failed to count chunks'));
+        };
+      };
+
+      request.onerror = () => {
+        reject(request.error || new Error('Failed to open IndexedDB'));
+      };
+    });
+  }
+
+  getChunkCount(): number {
+    return this.chunkCount;
+  }
+
+  getSessionId(): string {
+    return this.sessionId;
   }
 
   async appendChunk(chunk: Blob): Promise<void> {

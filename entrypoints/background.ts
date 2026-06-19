@@ -44,6 +44,7 @@ const MAX_LOG_LINES = 100;
 // ---------------------------------------------------------------------------
 
 const logBuffer: LogLine[] = [];
+const telemetryBuffer: { ts: number; event: string; details?: any }[] = [];
 
 function bgLog(level: LogLine['level'], msg: string): void {
   console[level]?.(LOG, msg);
@@ -53,6 +54,12 @@ function bgLog(level: LogLine['level'], msg: string): void {
   chrome.runtime
     .sendMessage({ type: 'LOG_LINE', line })
     .catch(() => undefined);
+}
+
+function telemetryLog(event: string, details?: any): void {
+  telemetryBuffer.push({ ts: Date.now(), event, details });
+  if (telemetryBuffer.length > 500) telemetryBuffer.shift();
+  bgLog('info', `[TELEMETRY] ${event} ${details ? JSON.stringify(details) : ''}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -69,8 +76,34 @@ let currentError: string | null = null;
 
 let focusStartTabId: number | null = null;
 let currentSourceTabId: number | null = null;
+let currentSessionId: string | null = null;
 
 const ARM_MENU_ID = 'arm-focus-tab';
+
+async function syncStateToStorage(): Promise<void> {
+  await chrome.storage.session.set({
+    recordingState,
+    duration,
+    currentError,
+    includeMic,
+    includeCam,
+    focusMode,
+    audioSettings,
+    appAudioState,
+  });
+}
+
+async function hydrateStateFromStorage(): Promise<void> {
+  const data = (await chrome.storage.session.get(null)) as any;
+  if (data.recordingState) recordingState = data.recordingState;
+  if (data.duration !== undefined) duration = data.duration;
+  if (data.currentError !== undefined) currentError = data.currentError;
+  if (data.includeMic !== undefined) includeMic = data.includeMic;
+  if (data.includeCam !== undefined) includeCam = data.includeCam;
+  if (data.focusMode !== undefined) focusMode = data.focusMode;
+  if (data.audioSettings) audioSettings = data.audioSettings;
+  if (data.appAudioState) appAudioState = data.appAudioState;
+}
 
 // ---------------------------------------------------------------------------
 // Native audio session state
@@ -106,6 +139,7 @@ function setAudioSessionStatus(
   extra?: Partial<AppAudioState>
 ): void {
   appAudioState = { ...appAudioState, sessionStatus, ...extra };
+  void syncStateToStorage();
   broadcastState();
 }
 
@@ -133,6 +167,7 @@ function clearAudioSession(): void {
   currentCaptureTarget = null;
   nativeAudioPreparing = false;
   attachAppAudioRetryCount = 0;
+  void syncStateToStorage();
   broadcastState();
 }
 
@@ -166,6 +201,7 @@ function scheduleAttachAppAudioRetry(): void {
 
 function onNativeHostDisconnect(err?: string): void {
   bgLog('warn', `native host disconnected: ${err ?? 'unknown'}`);
+  telemetryLog('NATIVE_DISCONNECTED', { err });
   // 'unknown' keeps the UI recoverable — the next ping/reconnect can succeed.
   setNativeHelperStatus('unknown');
   clearAudioSession();
@@ -273,6 +309,8 @@ function armCaptureWatchdog(): void {
     captureWatchdog = null;
     if (recordingState !== 'starting') return;
     bgLog('warn', 'capture watchdog fired — resetting');
+    chrome.storage.local.remove('activeSession').catch(() => undefined);
+    currentSessionId = null;
     recordingState = 'idle';
     duration = 0;
     currentError =
@@ -309,6 +347,7 @@ function getStatusPayload(): RecordingStatusPayload {
 }
 
 function broadcastState(): void {
+  void syncStateToStorage();
   chrome.runtime
     .sendMessage({ type: 'STATE_CHANGED', state: getStatusPayload() })
     .catch(() => undefined);
@@ -324,6 +363,18 @@ function broadcastBubbleRefresh(): void {
   });
 }
 
+function pingOffscreen(): Promise<any> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'OFFSCREEN_PING' }, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve(null);
+      } else {
+        resolve(response);
+      }
+    });
+  });
+}
+
 // ---------------------------------------------------------------------------
 // defineBackground entry point
 // ---------------------------------------------------------------------------
@@ -331,6 +382,58 @@ function broadcastBubbleRefresh(): void {
 export default defineBackground(() => {
   resetOffscreenReadyPromise();
   nativeAudio.connect(onNativeHostDisconnect);
+
+  void hydrateStateFromStorage().then(async () => {
+    bgLog('info', `Hydrated state from session storage: ${recordingState}`);
+    try {
+      const result = await chrome.storage.local.get(['activeSession']);
+      const activeSession = result.activeSession as any;
+      if (activeSession) {
+        if (activeSession.status === 'recording' || activeSession.status === 'paused') {
+          // Verify if offscreen is actually alive
+          const offscreenState = await pingOffscreen();
+          if (offscreenState) {
+            bgLog('info', `Detected active offscreen recording session: ${activeSession.sessionId}. Restoring state.`);
+            currentSessionId = activeSession.sessionId;
+            recordingState = offscreenState.state;
+            duration = offscreenState.duration;
+            focusMode = activeSession.focusMode;
+            includeMic = activeSession.includeMic;
+            includeCam = activeSession.includeCam;
+            broadcastState();
+          } else {
+            // Offscreen did not respond - check heartbeat
+            const HEARTBEAT_TIMEOUT_MS = 15000; // 15 seconds
+            if (Date.now() - activeSession.lastUpdateTime > HEARTBEAT_TIMEOUT_MS) {
+              bgLog('warn', `Detected crashed recording session: ${activeSession.sessionId}`);
+              activeSession.status = 'crashed';
+              await chrome.storage.local.set({ activeSession });
+              recordingState = 'interrupted';
+              currentError = 'Recording was interrupted due to a crash or reload.';
+              broadcastState();
+            } else {
+              // Heartbeat is fresh, offscreen might be loading, restore state
+              bgLog('info', `Heartbeat fresh for session: ${activeSession.sessionId}. Restoring state.`);
+              currentSessionId = activeSession.sessionId;
+              recordingState = activeSession.status;
+              duration = activeSession.duration;
+              focusMode = activeSession.focusMode;
+              includeMic = activeSession.includeMic;
+              includeCam = activeSession.includeCam;
+              broadcastState();
+            }
+          }
+        } else if (activeSession.status === 'crashed') {
+          bgLog('warn', `Detected interrupted recording session: ${activeSession.sessionId}`);
+          recordingState = 'interrupted';
+          currentError = 'Recording was interrupted due to a crash or reload.';
+          broadcastState();
+        }
+      }
+    } catch (err) {
+      bgLog('error', `Failed to check for interrupted session: ${err}`);
+    }
+  });
 
   // Open the side panel whenever the user clicks the toolbar action icon.
   chrome.sidePanel
@@ -369,6 +472,18 @@ export default defineBackground(() => {
     }
   });
 
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    if (recordingState === 'recording' || recordingState === 'paused') {
+      if (tabId === currentSourceTabId) {
+        bgLog('warn', `Recorded tab ${tabId} was closed!`);
+        chrome.runtime.sendMessage({
+          type: 'RECORDED_TAB_CLOSED',
+          tabId
+        }).catch(() => undefined);
+      }
+    }
+  });
+
   // Best-effort cleanup when the service worker is about to be suspended.
   chrome.runtime.onSuspend.addListener(() => {
     bgLog('info', 'service worker suspending — cleaning up');
@@ -387,6 +502,10 @@ export default defineBackground(() => {
         audioSettings = message.audioSettings ?? { ...DEFAULT_AUDIO_SETTINGS };
         startRecordingFlow(message.startingTabId);
         sendResponse({ success: true });
+        break;
+
+      case 'RESUME_INTERRUPTED_SESSION':
+        resumeRecordingFlow().then(() => sendResponse({ success: true }));
         break;
 
       case 'STOP_RECORDING_FLOW':
@@ -416,6 +535,10 @@ export default defineBackground(() => {
         sendResponse({ lines: logBuffer });
         break;
 
+      case 'GET_TELEMETRY':
+        sendResponse({ telemetry: telemetryBuffer });
+        break;
+
       // ---- Focus 1-1 / bubble -----------------------------------------------
 
       case 'GET_BUBBLE_STATUS': {
@@ -439,8 +562,20 @@ export default defineBackground(() => {
         break;
 
       case 'ARM_CURRENT_TAB':
-        armCurrentTab();
-        sendResponse({ success: true });
+        if (message.tabId != null) {
+          chrome.tabs.get(message.tabId, (t) => {
+            if (chrome.runtime.lastError || !t) {
+              sendResponse({ success: false, error: 'Tab not found' });
+            } else {
+              armCurrentTab(t);
+              sendResponse({ success: true });
+            }
+          });
+          return true; // keep channel open for async response
+        } else {
+          armCurrentTab();
+          sendResponse({ success: true });
+        }
         break;
 
       // ---- Offscreen events -------------------------------------------------
@@ -455,6 +590,15 @@ export default defineBackground(() => {
           message.surface as string,
           message.sourceLabel as string | undefined
         );
+        if (currentSessionId) {
+          chrome.storage.local.get(['activeSession'], (res) => {
+            const activeSession = res.activeSession as any;
+            if (activeSession && activeSession.sessionId === currentSessionId) {
+              activeSession.captureSource = message.surface;
+              chrome.storage.local.set({ activeSession }).catch(() => undefined);
+            }
+          });
+        }
         sendResponse({ success: true });
         break;
 
@@ -466,6 +610,17 @@ export default defineBackground(() => {
         if (focusMode && focusStartTabId) {
           tabFocusDetector.start([focusStartTabId]);
           currentSourceTabId = focusStartTabId;
+        }
+        if (currentSessionId) {
+          chrome.storage.local.get(['activeSession'], (res) => {
+            const activeSession = res.activeSession as any;
+            if (activeSession && activeSession.sessionId === currentSessionId) {
+              activeSession.startTime = Date.now();
+              activeSession.lastUpdateTime = Date.now();
+              activeSession.status = 'recording';
+              chrome.storage.local.set({ activeSession }).catch(() => undefined);
+            }
+          });
         }
         broadcastBubbleRefresh();
         sendResponse({ success: true });
@@ -485,6 +640,27 @@ export default defineBackground(() => {
 
       case 'RECORDING_RESUMED':
         recordingState = 'recording';
+        broadcastState();
+        sendResponse({ success: true });
+        break;
+
+      case 'STREAM_HEALTH_EVENT':
+        telemetryLog(message.event, { trackId: message.trackId });
+        if (message.event === 'VIDEO_SOURCE_LOST') {
+          currentError = 'Video source was lost. Recording continues with placeholder.';
+          broadcastState();
+        }
+        sendResponse({ success: true });
+        break;
+
+      case 'AUDIO_HEALTH_EVENT':
+        telemetryLog(message.event, { trackId: message.trackId });
+        sendResponse({ success: true });
+        break;
+
+      case 'VIDEO_SOURCE_LOST':
+        telemetryLog('VIDEO_SOURCE_LOST');
+        currentError = 'Video source was lost. Recording continues with placeholder.';
         broadcastState();
         sendResponse({ success: true });
         break;
@@ -562,6 +738,8 @@ export default defineBackground(() => {
         break;
 
       case 'RECORDING_ERROR':
+        chrome.storage.local.remove('activeSession').catch(() => undefined);
+        currentSessionId = null;
         clearCaptureWatchdog();
         currentError = message.error;
         bgLog('error', `recording error: ${message.error}`);
@@ -578,6 +756,8 @@ export default defineBackground(() => {
         break;
 
       case 'RECORDING_COMPLETE':
+        chrome.storage.local.remove('activeSession').catch(() => undefined);
+        currentSessionId = null;
         handleRecordingComplete(message.url, message.mimeType);
         sendResponse({ success: true });
         break;
@@ -687,6 +867,30 @@ export default defineBackground(() => {
         cameraWindowId = null;
         broadcastState();
         sendResponse({ success: true });
+        break;
+
+      case 'DISCARD_INTERRUPTED_SESSION':
+        chrome.storage.local.remove('activeSession').then(() => {
+          recordingState = 'idle';
+          currentError = null;
+          duration = 0;
+          broadcastState();
+          sendResponse({ success: true });
+        }).catch((err) => {
+          sendResponse({ success: false, error: err.message });
+        });
+        break;
+
+      case 'RECOVERED_SESSION_SAVED':
+        chrome.storage.local.remove('activeSession').then(() => {
+          recordingState = 'idle';
+          currentError = null;
+          duration = 0;
+          broadcastState();
+          sendResponse({ success: true });
+        }).catch((err) => {
+          sendResponse({ success: false, error: err.message });
+        });
         break;
     }
 
@@ -947,7 +1151,27 @@ function startRecordingFlow(startingTabId?: number): void {
   recordingState = 'starting';
   currentError = null;
   attachAppAudioRetryCount = 0;
+  currentSessionId = `session-${Date.now()}`;
   focusStartTabId = focusMode ? (startingTabId ?? null) : null;
+
+  // Save activeSession metadata immediately before starting MediaRecorder
+  chrome.storage.local.set({
+    activeSession: {
+      sessionId: currentSessionId,
+      startTime: Date.now(),
+      mimeType: 'video/webm',
+      duration: 0,
+      focusMode,
+      includeMic,
+      includeCam,
+      isActive: true,
+      status: 'recording',
+      lastChunkTime: Date.now(),
+      lastUpdateTime: Date.now(),
+      chunkCount: 0
+    }
+  }).catch(err => bgLog('error', `Failed to write initial activeSession: ${err}`));
+
   broadcastState();
   bgLog('info', `startRecordingFlow focusMode=${focusMode} mic=${includeMic} cam=${includeCam}`);
 
@@ -974,12 +1198,15 @@ function startRecordingFlow(startingTabId?: number): void {
         focusMode,
         audioSettings,
         initialStreamId,
+        sessionId: currentSessionId,
       });
       bgLog('info', 'START_RECORDING sent to offscreen');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to initialize recording';
       bgLog('error', `start failed: ${msg}`);
       clearCaptureWatchdog();
+      chrome.storage.local.remove('activeSession').catch(() => undefined);
+      currentSessionId = null;
       recordingState = 'idle';
       currentError = msg;
       broadcastState();
@@ -989,6 +1216,72 @@ function startRecordingFlow(startingTabId?: number): void {
       await doCleanupNativeAudio();
     }
   })();
+}
+
+async function resumeRecordingFlow(): Promise<void> {
+  try {
+    const result = await chrome.storage.local.get(['activeSession']);
+    const activeSession = result.activeSession as any;
+    if (!activeSession) {
+      throw new Error('No interrupted session found to resume');
+    }
+
+    recordingState = 'starting';
+    currentError = null;
+    attachAppAudioRetryCount = 0;
+    currentSessionId = activeSession.sessionId;
+    includeMic = activeSession.includeMic;
+    includeCam = activeSession.includeCam;
+    focusMode = activeSession.focusMode;
+    duration = activeSession.duration || 0;
+    broadcastState();
+
+    await ensureOffscreenDocument();
+    bgLog('info', `resuming recording session ${currentSessionId}`);
+
+    let initialStreamId: string | null = null;
+    if (focusMode) {
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (activeTab?.id) {
+        initialStreamId = await chrome.tabCapture.getMediaStreamId({
+          targetTabId: activeTab.id,
+        });
+        focusStartTabId = activeTab.id;
+      }
+    }
+
+    if (includeCam) await openCameraPreview();
+
+    armCaptureWatchdog();
+
+    // Update activeSession status to recording in local storage immediately
+    activeSession.status = 'recording';
+    activeSession.lastUpdateTime = Date.now();
+    await chrome.storage.local.set({ activeSession });
+
+    await chrome.runtime.sendMessage({
+      type: 'START_RECORDING',
+      includeMic,
+      focusMode,
+      audioSettings,
+      initialStreamId,
+      sessionId: currentSessionId,
+      isContinuation: true,
+      initialDuration: duration
+    });
+    bgLog('info', 'START_RECORDING (resume) sent to offscreen');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to resume recording';
+    bgLog('error', `resume failed: ${msg}`);
+    clearCaptureWatchdog();
+    recordingState = 'idle';
+    currentError = msg;
+    broadcastState();
+    tabFocusDetector.stop();
+    cleanupCamera();
+    await closeOffscreenDocument();
+    await doCleanupNativeAudio();
+  }
 }
 
 function stopRecordingFlow(): void {
