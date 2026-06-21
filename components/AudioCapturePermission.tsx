@@ -93,25 +93,28 @@ export function AudioCapturePermission({
   return (
     <div
       className={`sp-alert ${isDenied ? 'sp-alert--error' : 'sp-alert--warn'}`}
-      style={{ margin: '0 12px 8px' }}
+      style={{ margin: '12px 18px 0' }}
     >
-      <strong>{isDenied ? 'Audio device access blocked' : 'Audio device access required'}</strong>
-      <p style={{ margin: '6px 0 8px', fontSize: '0.9em', lineHeight: 1.4 }}>
-        Chrome needs audio device access to record application/screen audio via the virtual
-        device. This is separate from the <strong>Microphone</strong> toggle above.
+      <strong style={{ fontSize: '12px' }}>
+        {isDenied ? 'Audio device access blocked' : 'System audio capture setup'}
+      </strong>
+      <p style={{ margin: '4px 0 6px', fontSize: '11px', lineHeight: 1.4, opacity: 0.9 }}>
+        Chrome requires audio input permission to record application or screen audio via the virtual device. This is separate from the physical microphone.
       </p>
 
       {isDenied ? (
-        <p style={{ margin: '0 0 8px', fontSize: '0.9em' }}>
+        <p style={{ margin: '0 0 6px', fontSize: '11px' }}>
           Allow microphone for{' '}
-          <code style={{ fontSize: '0.85em' }}>{extensionMicSettingsOrigin()}</code>
+          <code style={{ fontSize: '10.5px', background: 'rgba(0,0,0,0.2)', padding: '1px 3px', borderRadius: '3px' }}>
+            {extensionMicSettingsOrigin()}
+          </code>
           {' '}in{' '}
           <a
             href={extensionMicSettingsUrl()}
             onClick={openMicSettings}
-            style={{ color: 'inherit', textDecoration: 'underline' }}
+            style={{ color: 'inherit', textDecoration: 'underline', fontWeight: 600 }}
           >
-            site settings
+            Chrome site settings
           </a>
           , then click Re-check.
         </p>
@@ -124,12 +127,12 @@ export function AudioCapturePermission({
           onClick={() => void handleGrant()}
           disabled={busy}
         >
-          {busy ? 'Requesting…' : isDenied ? 'Re-check' : 'Allow audio device access'}
+          {busy ? 'Requesting…' : isDenied ? 'Re-check' : 'Grant Permission'}
         </button>
       </div>
 
       {localError && (
-        <div className="sp-alert sp-alert--error sp-alert--sm" style={{ marginTop: 6 }}>
+        <div className="sp-alert sp-alert--error sp-alert--sm" style={{ marginTop: 6, padding: '6px 8px' }}>
           {localError}
         </div>
       )}

@@ -9,7 +9,7 @@ import { RecordingWatchdog } from './recordingWatchdog';
 export class ScreenRecorder {
   private mediaRecorder: MediaRecorder | null = null;
   private chunkStorage = new ChunkStorage();
-  private onBlobReady: (blob: Blob) => void;
+  private onRecordingReady: (sessionId: string, mimeType: string) => void;
   private onTimeUpdate: (seconds: number) => void;
   private onError: (error: Error) => void;
   private onStateChange: (state: 'recording' | 'paused') => void;
@@ -29,12 +29,12 @@ export class ScreenRecorder {
   private chunkCount = 0;
 
   constructor(options: {
-    onBlobReady: (blob: Blob) => void;
+    onRecordingReady: (sessionId: string, mimeType: string) => void;
     onTimeUpdate: (seconds: number) => void;
     onError: (error: Error) => void;
     onStateChange?: (state: 'recording' | 'paused') => void;
   }) {
-    this.onBlobReady = options.onBlobReady;
+    this.onRecordingReady = options.onRecordingReady;
     this.onTimeUpdate = options.onTimeUpdate;
     this.onError = options.onError;
     this.onStateChange = options.onStateChange ?? (() => undefined);
@@ -136,7 +136,11 @@ export class ScreenRecorder {
         console.log('[recorder] chunk', this.chunkCount, 'size:', event.data.size);
         const write = this.chunkStorage.appendChunk(event.data).catch((storageErr) => {
           console.error('[recorder] failed to persist chunk to IndexedDB:', storageErr);
-          this.onError(new Error('Failed to persist recording chunk'));
+          let errorMsg = 'Failed to persist recording chunk';
+          if (storageErr && (storageErr.name === 'QuotaExceededError' || storageErr.message?.includes('QuotaExceededError'))) {
+            errorMsg = 'Disk space is full or storage quota exceeded. Recording stopped.';
+          }
+          this.onError(new Error(errorMsg));
           void this.stop();
         });
         this.pendingChunkWrites.push(write);
@@ -155,6 +159,15 @@ export class ScreenRecorder {
       void this.chunkStorage.cleanup();
       this.cleanup();
     };
+
+    if (audioContext && audioContext.state === 'suspended') {
+      try {
+        await audioContext.resume();
+        console.log('[recorder] AudioContext resumed successfully before start');
+      } catch (err) {
+        console.warn('[recorder] Failed to resume AudioContext before start:', err);
+      }
+    }
 
     this.mediaRecorder.start(1000); // 1-second chunks per design refinement
     this.watchdog.start(this.mediaRecorder);
@@ -246,7 +259,12 @@ export class ScreenRecorder {
       this.audioContextToCleanup = null;
     }
 
-    this.mediaRecorder = null;
+    if (this.mediaRecorder) {
+      this.mediaRecorder.ondataavailable = null;
+      this.mediaRecorder.onstop = null;
+      this.mediaRecorder.onerror = null;
+      this.mediaRecorder = null;
+    }
   }
 
   private getElapsedMs(): number {
@@ -289,26 +307,23 @@ export class ScreenRecorder {
 
   private async finalizeRecording(): Promise<void> {
     const mimeType = this.recordedMimeType;
-    const durationMs = this.getElapsedMs();
+    const sessionId = this.chunkStorage.getSessionId();
 
     try {
       await Promise.all(this.pendingChunkWrites);
       this.pendingChunkWrites = [];
 
-      let finalBlob = await this.chunkStorage.assembleBlob(mimeType);
-      if (finalBlob.size === 0) {
+      if (this.chunkCount === 0) {
         this.onError(
           new Error('Recording is empty. Keep recording for at least a few seconds before stopping.')
         );
         return;
       }
 
-      finalBlob = await fixWebmDuration(finalBlob, durationMs);
-      this.onBlobReady(finalBlob);
+      this.onRecordingReady(sessionId, mimeType);
     } catch (err) {
       this.onError(new Error(`Failed to finalize recording: ${(err as Error).message}`));
     } finally {
-      await this.chunkStorage.cleanup();
       this.cleanup();
       this.stopResolve?.();
       this.stopResolve = null;

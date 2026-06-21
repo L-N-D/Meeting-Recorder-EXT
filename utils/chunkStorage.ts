@@ -150,14 +150,12 @@ export class ChunkStorage {
     return new Promise((resolve) => {
       const transaction = this.db!.transaction(this.STORE_NAME, 'readwrite');
       const store = transaction.objectStore(this.STORE_NAME);
+      const range = IDBKeyRange.bound(`${this.sessionId}-0`, `${this.sessionId}-\uffff`);
 
-      for (let i = 0; i < this.chunkCount; i += 1) {
-        const key = `${this.sessionId}-${i}`;
-        try {
-          store.delete(key);
-        } catch (err) {
-          console.warn(`Failed to schedule deletion for key ${key}:`, err);
-        }
+      try {
+        store.delete(range);
+      } catch (err) {
+        console.warn(`Failed to schedule range deletion for session ${this.sessionId}:`, err);
       }
 
       transaction.oncomplete = () => {

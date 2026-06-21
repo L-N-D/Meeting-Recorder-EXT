@@ -75,9 +75,9 @@ export const MicLevelMeter: React.FC<MicLevelMeterProps> = ({ enabled }) => {
     <div className="mic-meter">
       <span className="mic-meter-label">
         <Icon icon={Mic} size={14} className="mic-meter-icon" />
-        Mic level
+        Mic activity
       </span>
-      <div className="mic-meter-track">
+      <div className="mic-meter-track" role="progressbar" aria-label="Microphone volume activity" aria-valuemin={0} aria-valuemax={100}>
         <div ref={barRef} className="mic-meter-bar" />
       </div>
     </div>

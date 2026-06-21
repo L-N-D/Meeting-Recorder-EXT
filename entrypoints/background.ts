@@ -35,6 +35,9 @@ import {
   type RecordingState,
   type RecordingStatusPayload,
 } from '../utils/types';
+import { OffscreenManager } from '../utils/offscreenManager';
+import { CameraManager } from '../utils/cameraManager';
+import { DownloadService } from '../utils/downloadService';
 
 const LOG = '[background]';
 const MAX_LOG_LINES = 100;
@@ -289,12 +292,83 @@ async function doCleanupNativeAudio(): Promise<void> {
 // Offscreen document handshake
 // ---------------------------------------------------------------------------
 
-let cameraWindowId: number | null = null;
-let offscreenReadyResolve: (() => void) | null = null;
-let offscreenReadyPromise: Promise<void> | null = null;
+const offscreenManager = new OffscreenManager();
+const cameraManager = new CameraManager(() => {
+  includeCam = false;
+  broadcastState();
+});
+const downloadService = new DownloadService((error?: string, targetSessionId?: string) => {
+  recordingState = 'idle';
+  duration = 0;
+  currentError = error ?? null;
+  currentSourceTabId = null;
+  broadcastState();
+  broadcastBubbleRefresh();
+  cameraManager.cleanup();
+  void offscreenManager.closeDocument();
+  void doCleanupNativeAudio();
+  if (targetSessionId) {
+    deleteIndexedDBSession(targetSessionId).catch((err) => {
+      bgLog('error', `Failed to delete IndexedDB session chunks: ${err}`);
+    });
+  }
+});
 
 const CAPTURE_START_TIMEOUT_MS = 90_000;
 let captureWatchdog: ReturnType<typeof setTimeout> | null = null;
+let offscreenWatchdog: ReturnType<typeof setInterval> | null = null;
+
+function startOffscreenWatchdog(): void {
+  stopOffscreenWatchdog();
+  offscreenWatchdog = setInterval(async () => {
+    if (recordingState !== 'recording' && recordingState !== 'paused') {
+      stopOffscreenWatchdog();
+      return;
+    }
+    const alive = await offscreenManager.ping();
+    if (!alive) {
+      bgLog('error', 'Offscreen watchdog detected offscreen document crash/removal!');
+      void handleOffscreenCrash();
+    }
+  }, 8000);
+}
+
+function stopOffscreenWatchdog(): void {
+  if (offscreenWatchdog !== null) {
+    clearInterval(offscreenWatchdog);
+    offscreenWatchdog = null;
+  }
+}
+
+async function handleOffscreenCrash(): Promise<void> {
+  stopOffscreenWatchdog();
+  bgLog('warn', 'handling offscreen crash recovery');
+  
+  try {
+    const result = await chrome.storage.local.get(['activeSession']);
+    const activeSession = result.activeSession as any;
+    if (activeSession && activeSession.sessionId === currentSessionId) {
+      activeSession.status = 'crashed';
+      activeSession.lastUpdateTime = Date.now();
+      await chrome.storage.local.set({ activeSession });
+    }
+  } catch (err) {
+    bgLog('error', `watchdog recovery storage update failed: ${err}`);
+  }
+
+  currentSessionId = null;
+  clearCaptureWatchdog();
+  recordingState = 'interrupted';
+  currentError = 'Recording was interrupted due to offscreen document crash.';
+  broadcastState();
+  
+  tabFocusDetector.stop();
+  currentSourceTabId = null;
+  broadcastBubbleRefresh();
+  cameraManager.cleanup();
+  await offscreenManager.closeDocument();
+  await doCleanupNativeAudio();
+}
 
 function clearCaptureWatchdog(): void {
   if (captureWatchdog !== null) {
@@ -319,8 +393,8 @@ function armCaptureWatchdog(): void {
     tabFocusDetector.stop();
     currentSourceTabId = null;
     broadcastBubbleRefresh();
-    cleanupCamera();
-    void closeOffscreenDocument();
+    cameraManager.cleanup();
+    void offscreenManager.closeDocument();
     void doCleanupNativeAudio();
   }, CAPTURE_START_TIMEOUT_MS);
 }
@@ -363,24 +437,12 @@ function broadcastBubbleRefresh(): void {
   });
 }
 
-function pingOffscreen(): Promise<any> {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: 'OFFSCREEN_PING' }, (response) => {
-      if (chrome.runtime.lastError) {
-        resolve(null);
-      } else {
-        resolve(response);
-      }
-    });
-  });
-}
-
 // ---------------------------------------------------------------------------
 // defineBackground entry point
 // ---------------------------------------------------------------------------
 
 export default defineBackground(() => {
-  resetOffscreenReadyPromise();
+  offscreenManager.resetReadyPromise();
   nativeAudio.connect(onNativeHostDisconnect);
 
   void hydrateStateFromStorage().then(async () => {
@@ -391,7 +453,7 @@ export default defineBackground(() => {
       if (activeSession) {
         if (activeSession.status === 'recording' || activeSession.status === 'paused') {
           // Verify if offscreen is actually alive
-          const offscreenState = await pingOffscreen();
+          const offscreenState = await offscreenManager.ping();
           if (offscreenState) {
             bgLog('info', `Detected active offscreen recording session: ${activeSession.sessionId}. Restoring state.`);
             currentSessionId = activeSession.sessionId;
@@ -465,11 +527,7 @@ export default defineBackground(() => {
   });
 
   chrome.windows.onRemoved.addListener((windowId) => {
-    if (cameraWindowId !== null && windowId === cameraWindowId) {
-      cameraWindowId = null;
-      includeCam = false;
-      broadcastState();
-    }
+    cameraManager.handleWindowRemoved(windowId);
   });
 
   chrome.tabs.onRemoved.addListener((tabId) => {
@@ -487,6 +545,7 @@ export default defineBackground(() => {
   // Best-effort cleanup when the service worker is about to be suspended.
   chrome.runtime.onSuspend.addListener(() => {
     bgLog('info', 'service worker suspending — cleaning up');
+    stopOffscreenWatchdog();
     void doCleanupNativeAudio();
   });
 
@@ -524,6 +583,16 @@ export default defineBackground(() => {
         if (recordingState === 'paused') {
           chrome.runtime.sendMessage({ type: 'RESUME_RECORDING' }).catch(() => undefined);
         }
+        sendResponse({ success: true });
+        break;
+
+      case 'UPDATE_AUDIO_SETTINGS':
+        audioSettings = message.audioSettings;
+        void syncStateToStorage();
+        chrome.runtime.sendMessage({
+          type: 'UPDATE_AUDIO_SETTINGS',
+          audioSettings
+        }).catch(() => undefined);
         sendResponse({ success: true });
         break;
 
@@ -581,7 +650,7 @@ export default defineBackground(() => {
       // ---- Offscreen events -------------------------------------------------
 
       case 'OFFSCREEN_READY':
-        resolveOffscreenReady();
+        offscreenManager.resolveReady();
         sendResponse({ success: true });
         break;
 
@@ -607,6 +676,7 @@ export default defineBackground(() => {
         recordingState = 'recording';
         duration = 0;
         broadcastState();
+        startOffscreenWatchdog();
         if (focusMode && focusStartTabId) {
           tabFocusDetector.start([focusStartTabId]);
           currentSourceTabId = focusStartTabId;
@@ -738,6 +808,7 @@ export default defineBackground(() => {
         break;
 
       case 'RECORDING_ERROR':
+        stopOffscreenWatchdog();
         chrome.storage.local.remove('activeSession').catch(() => undefined);
         currentSessionId = null;
         clearCaptureWatchdog();
@@ -749,16 +820,20 @@ export default defineBackground(() => {
         tabFocusDetector.stop();
         currentSourceTabId = null;
         broadcastBubbleRefresh();
-        cleanupCamera();
-        void closeOffscreenDocument();
+        cameraManager.cleanup();
+        void offscreenManager.closeDocument();
         void doCleanupNativeAudio();
         sendResponse({ success: true });
         break;
 
       case 'RECORDING_COMPLETE':
+        stopOffscreenWatchdog();
         chrome.storage.local.remove('activeSession').catch(() => undefined);
         currentSessionId = null;
-        handleRecordingComplete(message.url, message.mimeType);
+        tabFocusDetector.stop();
+        bgLog('info', `RECORDING_COMPLETE mimeType=${message.mimeType} sessionId=${message.sessionId}`);
+        const streamUrl = chrome.runtime.getURL(`/stream-download?sessionId=${message.sessionId}&mimeType=${encodeURIComponent(message.mimeType)}`);
+        downloadService.download(message.blobUrl || streamUrl, message.mimeType, message.sessionId);
         sendResponse({ success: true });
         break;
 
@@ -863,9 +938,7 @@ export default defineBackground(() => {
       // ---- Camera preview ---------------------------------------------------
 
       case 'CAMERA_WINDOW_CLOSED':
-        includeCam = false;
-        cameraWindowId = null;
-        broadcastState();
+        cameraManager.cleanup();
         sendResponse({ success: true });
         break;
 
@@ -902,52 +975,6 @@ export default defineBackground(() => {
 // Offscreen handshake
 // ---------------------------------------------------------------------------
 
-function resetOffscreenReadyPromise(): void {
-  offscreenReadyPromise = new Promise<void>((resolve) => {
-    offscreenReadyResolve = resolve;
-  });
-}
-
-function resolveOffscreenReady(): void {
-  offscreenReadyResolve?.();
-  offscreenReadyResolve = null;
-}
-
-async function ensureOffscreenDocument(): Promise<void> {
-  await closeOffscreenDocument();
-  resetOffscreenReadyPromise();
-
-  await chrome.offscreen.createDocument({
-    url: 'offscreen.html',
-    reasons: [
-      chrome.offscreen.Reason.DISPLAY_MEDIA,
-      chrome.offscreen.Reason.USER_MEDIA,
-      chrome.offscreen.Reason.AUDIO_PLAYBACK,
-    ],
-    justification: 'Capture screen/tab/app audio, mix audio, and monitor to speakers',
-  });
-
-  await Promise.race([
-    offscreenReadyPromise,
-    new Promise<void>((_, reject) =>
-      setTimeout(
-        () => reject(new Error('Offscreen document did not become ready in time')),
-        5000
-      )
-    ),
-  ]);
-}
-
-async function closeOffscreenDocument(): Promise<void> {
-  try {
-    await chrome.offscreen.closeDocument();
-  } catch {
-    // Already closed — safe to ignore.
-  } finally {
-    offscreenReadyResolve = null;
-    offscreenReadyPromise = null;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // displaySurface detection — triggers native audio prep for app windows
@@ -967,7 +994,7 @@ function handleDisplaySurfaceDetected(surface: string, sourceLabel?: string): vo
 
   void (async () => {
     try {
-      if (!(await ensureNativeConnected())) {
+            if (!(await ensureNativeConnected())) {
         bgLog('warn', `${surface} capture: native host not connected — skipping audio prep`);
         setAudioSessionStatus('error', { error: 'Native host is not connected' });
         return;
@@ -1177,7 +1204,7 @@ function startRecordingFlow(startingTabId?: number): void {
 
   void (async () => {
     try {
-      await ensureOffscreenDocument();
+      await offscreenManager.ensureDocument();
       bgLog('info', 'offscreen ready');
 
       let initialStreamId: string | null = null;
@@ -1188,10 +1215,11 @@ function startRecordingFlow(startingTabId?: number): void {
         bgLog('info', `tab stream id acquired for tab ${startingTabId}`);
       }
 
-      if (includeCam) await openCameraPreview();
+      if (includeCam) await cameraManager.open();
 
       armCaptureWatchdog();
 
+      const platformInfo = await chrome.runtime.getPlatformInfo();
       await chrome.runtime.sendMessage({
         type: 'START_RECORDING',
         includeMic,
@@ -1199,6 +1227,7 @@ function startRecordingFlow(startingTabId?: number): void {
         audioSettings,
         initialStreamId,
         sessionId: currentSessionId,
+        os: platformInfo.os,
       });
       bgLog('info', 'START_RECORDING sent to offscreen');
     } catch (err) {
@@ -1211,8 +1240,8 @@ function startRecordingFlow(startingTabId?: number): void {
       currentError = msg;
       broadcastState();
       tabFocusDetector.stop();
-      cleanupCamera();
-      await closeOffscreenDocument();
+      cameraManager.cleanup();
+      await offscreenManager.closeDocument();
       await doCleanupNativeAudio();
     }
   })();
@@ -1236,7 +1265,7 @@ async function resumeRecordingFlow(): Promise<void> {
     duration = activeSession.duration || 0;
     broadcastState();
 
-    await ensureOffscreenDocument();
+    await offscreenManager.ensureDocument();
     bgLog('info', `resuming recording session ${currentSessionId}`);
 
     let initialStreamId: string | null = null;
@@ -1250,7 +1279,7 @@ async function resumeRecordingFlow(): Promise<void> {
       }
     }
 
-    if (includeCam) await openCameraPreview();
+    if (includeCam) await cameraManager.open();
 
     armCaptureWatchdog();
 
@@ -1259,6 +1288,7 @@ async function resumeRecordingFlow(): Promise<void> {
     activeSession.lastUpdateTime = Date.now();
     await chrome.storage.local.set({ activeSession });
 
+    const platformInfo = await chrome.runtime.getPlatformInfo();
     await chrome.runtime.sendMessage({
       type: 'START_RECORDING',
       includeMic,
@@ -1267,7 +1297,8 @@ async function resumeRecordingFlow(): Promise<void> {
       initialStreamId,
       sessionId: currentSessionId,
       isContinuation: true,
-      initialDuration: duration
+      initialDuration: duration,
+      os: platformInfo.os,
     });
     bgLog('info', 'START_RECORDING (resume) sent to offscreen');
   } catch (err) {
@@ -1278,8 +1309,8 @@ async function resumeRecordingFlow(): Promise<void> {
     currentError = msg;
     broadcastState();
     tabFocusDetector.stop();
-    cleanupCamera();
-    await closeOffscreenDocument();
+    cameraManager.cleanup();
+    await offscreenManager.closeDocument();
     await doCleanupNativeAudio();
   }
 }
@@ -1297,77 +1328,13 @@ function stopRecordingFlow(): void {
     recordingState = 'idle';
     currentError = 'Failed to stop recording. Please try again.';
     broadcastState();
-    cleanupCamera();
-    await closeOffscreenDocument();
+    cameraManager.cleanup();
+    await offscreenManager.closeDocument();
     await doCleanupNativeAudio();
   });
 }
 
-function handleRecordingComplete(blobUrl: string, mimeType: string): void {
-  tabFocusDetector.stop();
-  bgLog('info', `RECORDING_COMPLETE mimeType=${mimeType} hasUrl=${Boolean(blobUrl)}`);
 
-  const finish = (error?: string) => {
-    recordingState = 'idle';
-    duration = 0;
-    currentError = error ?? null;
-    currentSourceTabId = null;
-    broadcastState();
-    broadcastBubbleRefresh();
-    cleanupCamera();
-    void closeOffscreenDocument();
-    void doCleanupNativeAudio();
-  };
-
-  if (!blobUrl) {
-    finish('Recording failed: no video data was produced.');
-    return;
-  }
-
-  const isMp4 = mimeType?.includes('video/mp4');
-  const ext = isMp4 ? 'mp4' : 'webm';
-  const filename = `recording-${buildTimestamp()}.${ext}`;
-
-  chrome.downloads.download({ url: blobUrl, filename, saveAs: false }, (downloadId) => {
-    if (chrome.runtime.lastError || downloadId === undefined) {
-      finish(`Download failed: ${chrome.runtime.lastError?.message || 'unknown error'}`);
-      return;
-    }
-    bgLog('info', `download started id=${downloadId} file=${filename}`);
-
-    let settled = false;
-    const settle = (error?: string) => {
-      if (settled) return;
-      settled = true;
-      chrome.downloads.onChanged.removeListener(onChanged);
-      finish(error);
-    };
-
-    const onChanged = (delta: chrome.downloads.DownloadDelta) => {
-      if (delta.id !== downloadId || !delta.state) return;
-      if (delta.state.current === 'complete') settle();
-      else if (delta.state.current === 'interrupted')
-        settle('Download was interrupted before completing.');
-    };
-    chrome.downloads.onChanged.addListener(onChanged);
-
-    chrome.downloads.search({ id: downloadId }, (items) => {
-      const item = items?.[0];
-      if (item?.state === 'complete') settle();
-      else if (item?.state === 'interrupted')
-        settle('Download was interrupted before completing.');
-    });
-  });
-}
-
-function buildTimestamp(): string {
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return (
-    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
-    `-${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`
-  );
-}
 
 // ---------------------------------------------------------------------------
 // Focus 1-1 source switching
@@ -1417,36 +1384,6 @@ function armCurrentTab(tab?: chrome.tabs.Tab): void {
 }
 
 // ---------------------------------------------------------------------------
-// Camera preview
-// ---------------------------------------------------------------------------
-
-async function openCameraPreview(): Promise<void> {
-  try {
-    const win = await chrome.windows.create({
-      url: 'camera.html',
-      type: 'popup',
-      width: 240,
-      height: 240,
-      top: 80,
-      left: 80,
-      focused: false,
-    });
-    cameraWindowId = win?.id ?? null;
-  } catch (err) {
-    bgLog('warn', `failed to open camera preview: ${err}`);
-  }
-}
-
-function cleanupCamera(): void {
-  if (cameraWindowId !== null) {
-    const id = cameraWindowId;
-    cameraWindowId = null;
-    chrome.windows.remove(id).catch(() => undefined);
-  }
-  includeCam = false;
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1456,4 +1393,132 @@ function describeNativeError(err: unknown): string {
     if (e.message) return e.code ? `${e.message} (${e.code})` : e.message;
   }
   return String(err);
+}
+
+// ---------------------------------------------------------------------------
+// IndexedDB Stream-saving & Cleanup Helpers for SW
+// ---------------------------------------------------------------------------
+
+function getChunkFromIndexedDB(sessionId: string, index: number): Promise<Blob | null> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('RecordExtensionDB', 1);
+    request.onsuccess = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains('chunks')) {
+        db.close();
+        resolve(null);
+        return;
+      }
+      try {
+        const transaction = db.transaction('chunks', 'readonly');
+        const store = transaction.objectStore('chunks');
+        const key = `${sessionId}-${index}`;
+        const getReq = store.get(key);
+        getReq.onsuccess = () => {
+          db.close();
+          resolve(getReq.result || null);
+        };
+        getReq.onerror = () => {
+          db.close();
+          reject(getReq.error || new Error('failed to get chunk'));
+        };
+      } catch (err) {
+        db.close();
+        reject(err);
+      }
+    };
+    request.onerror = () => {
+      reject(request.error || new Error('failed to open db'));
+    };
+  });
+}
+
+function deleteIndexedDBSession(sessionId: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('RecordExtensionDB', 1);
+    request.onsuccess = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains('chunks')) {
+        db.close();
+        resolve();
+        return;
+      }
+      try {
+        const transaction = db.transaction('chunks', 'readwrite');
+        const store = transaction.objectStore('chunks');
+        const range = IDBKeyRange.bound(`${sessionId}-0`, `${sessionId}-\uffff`);
+        const cursorRequest = store.openCursor(range);
+        
+        cursorRequest.onsuccess = (event: any) => {
+          const cursor = event.target.result;
+          if (cursor) {
+            store.delete(cursor.primaryKey);
+            cursor.continue();
+          } else {
+            db.close();
+            bgLog('info', `Successfully cleaned up IndexedDB session chunks for ${sessionId}`);
+            resolve();
+          }
+        };
+        
+        cursorRequest.onerror = () => {
+          db.close();
+          reject(cursorRequest.error || new Error('cursor error'));
+        };
+      } catch (err) {
+        db.close();
+        reject(err);
+      }
+    };
+    request.onerror = () => {
+      reject(request.error || new Error('failed to open db'));
+    };
+  });
+}
+
+// Intercept stream download requests to prevent OOM
+if (typeof self !== 'undefined' && typeof self.addEventListener === 'function') {
+  self.addEventListener('fetch', (event: any) => {
+    const url = new URL(event.request.url);
+    if (url.pathname.endsWith('/stream-download')) {
+      const sessionId = url.searchParams.get('sessionId');
+      const mimeType = url.searchParams.get('mimeType') || 'video/webm';
+      
+      if (!sessionId) {
+        event.respondWith(new Response('Missing sessionId', { status: 400 }));
+        return;
+      }
+
+      const stream = new ReadableStream({
+        async start(controller) {
+          let index = 0;
+          const readNext = async (): Promise<void> => {
+            try {
+              const chunk = await getChunkFromIndexedDB(sessionId, index);
+              if (chunk) {
+                const buffer = await chunk.arrayBuffer();
+                controller.enqueue(new Uint8Array(buffer));
+                index += 1;
+                await readNext();
+              } else {
+                controller.close();
+              }
+            } catch (err) {
+              console.error('[background] stream read error:', err);
+              controller.error(err);
+            }
+          };
+          await readNext();
+        }
+      });
+
+      event.respondWith(new Response(stream, {
+        headers: {
+          'Content-Type': mimeType,
+          'Content-Disposition': `attachment; filename="recording-${sessionId}.webm"`,
+          'Cache-Control': 'no-cache'
+        }
+      }));
+    }
+  });
 }

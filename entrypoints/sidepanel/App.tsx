@@ -19,7 +19,8 @@ import {
 } from '../../utils/audioCapturePermission';
 import { ChunkStorage } from '../../utils/chunkStorage';
 import { fixWebmDuration } from '../../utils/webmDurationFix';
-import { AlertOctagon, Download, Trash2, Loader, AlertTriangle, AlertCircle, RefreshCw } from 'lucide-react';
+import { AlertOctagon, Download, Trash2, Loader, AlertTriangle, AlertCircle, RefreshCw, Settings, ChevronDown, Mic, Camera } from 'lucide-react';
+import { formatTime } from '../../utils/format';
 
 const CAPTURABLE_URL_PREFIXES = ['http://', 'https://'];
 
@@ -63,6 +64,90 @@ export default function App() {
   const [selectedFallbackTab, setSelectedFallbackTab] = useState<string>('');
   const [switchingSource, setSwitchingSource] = useState(false);
 
+  // ---- Audio Alert State ----
+  const [audioSilentAlert, setAudioSilentAlert] = useState(false);
+  const [advancedExpanded, setAdvancedExpanded] = useState(false);
+
+  // ---- Permission States for Onboarding Setup ----
+  const [micPermissionState, setMicPermissionState] = useState<'prompt' | 'granted' | 'denied'>('prompt');
+  const [camPermissionState, setCamPermissionState] = useState<'prompt' | 'granted' | 'denied'>('prompt');
+
+  // Query permissions on mount
+  useEffect(() => {
+    if (typeof navigator.permissions?.query === 'function') {
+      navigator.permissions.query({ name: 'microphone' as PermissionName }).then((status) => {
+        setMicPermissionState(status.state as any);
+        status.onchange = () => setMicPermissionState(status.state as any);
+      }).catch(() => undefined);
+
+      navigator.permissions.query({ name: 'camera' as PermissionName }).then((status) => {
+        setCamPermissionState(status.state as any);
+        status.onchange = () => setCamPermissionState(status.state as any);
+      }).catch(() => undefined);
+    }
+  }, []);
+
+  const openPermissionTab = (audio: boolean, video: boolean) => {
+    const url = chrome.runtime.getURL(`permission.html?audio=${audio}&video=${video}`);
+    chrome.tabs.create({ url });
+  };
+
+  const requestAudioPermission = async () => {
+    openPermissionTab(true, false);
+  };
+
+  const requestVideoPermission = async () => {
+    openPermissionTab(false, true);
+  };
+
+  const requestAllPermissions = async () => {
+    openPermissionTab(includeMic, includeCam);
+  };
+
+  const recheckPermissions = async () => {
+    if (typeof navigator.permissions?.query === 'function') {
+      try {
+        const mic = await navigator.permissions.query({ name: 'microphone' as PermissionName });
+        setMicPermissionState(mic.state as any);
+        const cam = await navigator.permissions.query({ name: 'camera' as PermissionName });
+        setCamPermissionState(cam.state as any);
+      } catch (err) {
+        await checkPermissionsMedia();
+      }
+    } else {
+      await checkPermissionsMedia();
+    }
+  };
+
+  const checkPermissionsMedia = async () => {
+    if (includeMic) {
+      try {
+        const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+        s.getTracks().forEach((t) => t.stop());
+        setMicPermissionState('granted');
+      } catch (err: any) {
+        if (err.name === 'NotAllowedError' || err.message?.includes('Permission denied')) {
+          setMicPermissionState('denied');
+        } else {
+          setMicPermissionState('prompt');
+        }
+      }
+    }
+    if (includeCam) {
+      try {
+        const s = await navigator.mediaDevices.getUserMedia({ video: true });
+        s.getTracks().forEach((t) => t.stop());
+        setCamPermissionState('granted');
+      } catch (err: any) {
+        if (err.name === 'NotAllowedError' || err.message?.includes('Permission denied')) {
+          setCamPermissionState('denied');
+        } else {
+          setCamPermissionState('prompt');
+        }
+      }
+    }
+  };
+
   // ---- Sync from background ------------------------------------------------
 
   const syncFromBackground = useCallback(
@@ -77,6 +162,9 @@ export default function App() {
       appAudio?: AppAudioState;
     }) => {
       setRecordingState(state.recordingState);
+      if (state.recordingState === 'idle') {
+        setAudioSilentAlert(false);
+      }
       setDuration(state.duration);
       setError(state.error);
       setIncludeMic(state.includeMic);
@@ -116,6 +204,13 @@ export default function App() {
       }
       if (message.type === 'STREAM_HEALTH_EVENT' && message.event === 'VIDEO_SOURCE_LOST') {
         setSourceLostAlert(true);
+      }
+      if (message.type === 'AUDIO_HEALTH_EVENT') {
+        if (message.event === 'AUDIO_SILENT' || message.event === 'AUDIO_SOURCE_LOST') {
+          setAudioSilentAlert(true);
+        } else if (message.event === 'AUDIO_ACTIVE') {
+          setAudioSilentAlert(false);
+        }
       }
     };
 
@@ -202,6 +297,16 @@ export default function App() {
       });
     }
   }, [sourceLostAlert]);
+
+  const handleAudioSettingsChange = (settings: AudioMixSettings) => {
+    setAudioSettings(settings);
+    if (recordingState === 'recording' || recordingState === 'paused') {
+      chrome.runtime.sendMessage({
+        type: 'UPDATE_AUDIO_SETTINGS',
+        audioSettings: settings,
+      }).catch(() => undefined);
+    }
+  };
 
   const handleResumeSession = async () => {
     if (!interruptedSession) return;
@@ -320,8 +425,32 @@ export default function App() {
     });
   };
 
+  const handleToggleMic = () => {
+    const next = !includeMic;
+    setIncludeMic(next);
+    if (next && micPermissionState !== 'granted') {
+      openPermissionTab(true, includeCam);
+    }
+  };
+
+  const handleToggleCam = () => {
+    const next = !includeCam;
+    setIncludeCam(next);
+    if (next && camPermissionState !== 'granted') {
+      openPermissionTab(includeMic, true);
+    }
+  };
+
   const handleStart = async () => {
     setError(null);
+
+    // If permissions are not granted, open the permission tab and stop
+    const needMic = includeMic && micPermissionState !== 'granted';
+    const needCam = includeCam && camPermissionState !== 'granted';
+    if (needMic || needCam) {
+      openPermissionTab(includeMic, includeCam);
+      return;
+    }
 
     if (focusMode && selectedTabIds.length === 0) {
       setError('Select at least one tab for Focus 1-1 mode.');
@@ -414,11 +543,19 @@ export default function App() {
     chrome.runtime.sendMessage({ type: 'RESUME_RECORDING_FLOW' });
   };
 
+  const showOnboarding = recordingState === 'idle' && (
+    (includeMic && micPermissionState !== 'granted') ||
+    (includeCam && camPermissionState !== 'granted')
+  );
+
   return (
     <div className="sp-root">
       {/* Header */}
       <header className="sp-header">
-        <span className="sp-title">EXT Recorder</span>
+        <span className="sp-title">
+          <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)' }} />
+          EXT Recorder
+        </span>
         {(recordingState === 'recording' || recordingState === 'paused') && (
           <span className="sp-header-timer">
             <span className={`sp-dot ${recordingState === 'recording' ? 'sp-dot--pulse' : 'sp-dot--paused'}`} />
@@ -427,11 +564,119 @@ export default function App() {
         )}
       </header>
 
+      {audioSilentAlert && (recordingState === 'recording' || recordingState === 'paused') && (
+        <div className="sp-audio-alert sp-alert--pulse">
+          <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: '2px' }} />
+          <span>Warning: No audio signal detected from microphone. Check your connection.</span>
+        </div>
+      )}
+
+      {/* Permission alert placed high up for maximum discoverability */}
+      {recordingState === 'idle' && !showOnboarding && (
+        <AudioCapturePermission
+          nativeHelperStatus={appAudio.nativeHelperStatus}
+          focusMode={focusMode}
+          recordingState={recordingState}
+          onGranted={handleAudioCaptureGranted}
+        />
+      )}
+
       {/* Content Area */}
-      {recordingState === 'interrupted' ? (
+      {showOnboarding ? (
+        <div className="permission-screen">
+          <div className="permission-illustration">
+            <span className="permission-pulse-circle">
+              <AlertOctagon size={32} className="permission-icon-glow" style={{ color: (includeMic && micPermissionState === 'denied') || (includeCam && camPermissionState === 'denied') ? 'var(--color-danger)' : 'var(--color-accent)' }} />
+            </span>
+          </div>
+
+          <h2 className="permission-title">
+            {(includeMic && micPermissionState === 'denied') || (includeCam && camPermissionState === 'denied') ? 'Access Blocked' : 'Enable Device Access'}
+          </h2>
+          <p className="permission-desc">
+            {(includeMic && micPermissionState === 'denied') || (includeCam && camPermissionState === 'denied')
+              ? 'Chrome has blocked access to your microphone or camera. Please allow device access in site settings to proceed.'
+              : 'To record meetings along with your voice or camera overlay, please grant microphone and camera permissions.'}
+          </p>
+
+          <div className="permission-cards-list">
+            {includeMic && (
+              <div className={`permission-item-card ${micPermissionState === 'granted' ? 'granted' : micPermissionState === 'denied' ? 'denied' : ''}`}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Mic size={18} className="permission-card-item-icon" />
+                  <div style={{ textAlign: 'left' }}>
+                    <div style={{ fontWeight: 600, fontSize: '12px' }}>Microphone Access</div>
+                    <div style={{ fontSize: '10.5px', color: 'var(--text-secondary)' }}>
+                      {micPermissionState === 'granted' ? 'Granted successfully' : micPermissionState === 'denied' ? 'Blocked by browser' : 'Required for audio'}
+                    </div>
+                  </div>
+                </div>
+                {micPermissionState === 'prompt' && (
+                  <button className="sp-btn sp-btn--primary sp-btn--sm" onClick={requestAudioPermission}>
+                    Allow
+                  </button>
+                )}
+              </div>
+            )}
+
+            {includeCam && (
+              <div className={`permission-item-card ${camPermissionState === 'granted' ? 'granted' : camPermissionState === 'denied' ? 'denied' : ''}`}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Camera size={18} className="permission-card-item-icon" />
+                  <div style={{ textAlign: 'left' }}>
+                    <div style={{ fontWeight: 600, fontSize: '12px' }}>Camera Access</div>
+                    <div style={{ fontSize: '10.5px', color: 'var(--text-secondary)' }}>
+                      {camPermissionState === 'granted' ? 'Granted successfully' : camPermissionState === 'denied' ? 'Blocked by browser' : 'Required for video'}
+                    </div>
+                  </div>
+                </div>
+                {camPermissionState === 'prompt' && (
+                  <button className="sp-btn sp-btn--primary sp-btn--sm" onClick={requestVideoPermission}>
+                    Allow
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          {((includeMic && micPermissionState === 'denied') || (includeCam && camPermissionState === 'denied')) ? (
+            <div className="permission-instruction-box">
+              <div style={{ fontWeight: 600, marginBottom: 4 }}>How to Unblock:</div>
+              <ol style={{ paddingLeft: 16, fontSize: '11px', textAlign: 'left', lineHeight: 1.45 }}>
+                <li>Click the camera icon 📹 or site settings icon in your browser URL bar.</li>
+                <li>Change Microphone/Camera block to <strong>"Allow"</strong>.</li>
+                <li>Click the <strong>Re-check Permissions</strong> button below.</li>
+              </ol>
+            </div>
+          ) : (
+            <button className="sp-btn sp-btn--primary" onClick={requestAllPermissions} style={{ width: '100%', justifyContent: 'center', padding: '10px 16px' }}>
+              Request Access
+            </button>
+          )}
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%', marginTop: 8 }}>
+            {((includeMic && micPermissionState === 'denied') || (includeCam && camPermissionState === 'denied')) && (
+              <button className="sp-btn sp-btn--primary" onClick={recheckPermissions} style={{ justifyContent: 'center' }}>
+                Re-check Permissions
+              </button>
+            )}
+            
+            <button
+              className="sp-btn sp-btn--secondary"
+              onClick={() => {
+                setIncludeMic(false);
+                setIncludeCam(false);
+              }}
+              style={{ justifyContent: 'center' }}
+            >
+              Skip & Record Screen Only
+            </button>
+          </div>
+        </div>
+      ) : recordingState === 'interrupted' ? (
         <section className="sp-recovery-card">
           <div className="sp-recovery-title">
-            <AlertOctagon size={16} style={{ color: 'var(--sp-danger)' }} />
+            <AlertOctagon size={16} style={{ color: 'var(--color-danger)' }} />
             Interrupted Session Detected
           </div>
           <p className="sp-recovery-meta">
@@ -474,7 +719,7 @@ export default function App() {
                 className="sp-btn sp-btn--secondary" 
                 onClick={handleDiscard} 
                 disabled={recovering}
-                style={{ flex: 1, justifyContent: 'center', borderColor: 'rgba(224, 82, 82, 0.4)', color: 'var(--sp-danger)' }}
+                style={{ flex: 1, justifyContent: 'center', borderColor: 'rgba(239, 68, 68, 0.4)', color: 'var(--color-danger)' }}
               >
                 <Trash2 size={14} />
                 Discard
@@ -491,10 +736,10 @@ export default function App() {
             includeCam={includeCam}
             focusMode={focusMode}
             audioSettings={audioSettings}
-            onToggleMic={() => setIncludeMic((v) => !v)}
-            onToggleCam={() => setIncludeCam((v) => !v)}
+            onToggleMic={handleToggleMic}
+            onToggleCam={handleToggleCam}
             onToggleFocusMode={() => setFocusMode((v) => !v)}
-            onAudioSettingsChange={setAudioSettings}
+            onAudioSettingsChange={handleAudioSettingsChange}
             tabsList={tabsList}
             selectedTabIds={selectedTabIds}
             activeTabId={activeTabId}
@@ -541,7 +786,7 @@ export default function App() {
               
               {openTabs.length > 0 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <span style={{ fontSize: '10px', color: 'var(--sp-text-muted)', fontWeight: 600 }}>SWITCH TO ANOTHER TAB</span>
+                  <span style={{ fontSize: '10px', color: 'var(--text-secondary)', fontWeight: 600 }}>SWITCH TO ANOTHER TAB</span>
                   <div style={{ display: 'flex', gap: 6 }}>
                     <select 
                       className="sp-select"
@@ -574,28 +819,36 @@ export default function App() {
         </div>
       )}
 
-      <AudioCapturePermission
-        nativeHelperStatus={appAudio.nativeHelperStatus}
-        focusMode={focusMode}
-        recordingState={recordingState}
-        onGranted={handleAudioCaptureGranted}
-      />
+      {/* Advanced Settings fold shown only in idle to declutter recording view */}
+      {recordingState === 'idle' && (
+        <div className="accordion">
+          <button
+            className="accordion-header"
+            onClick={() => setAdvancedExpanded(!advancedExpanded)}
+            aria-expanded={advancedExpanded}
+          >
+            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <Settings size={14} />
+              Advanced Settings
+            </span>
+            <ChevronDown
+              size={14}
+              className={`accordion-icon ${advancedExpanded ? 'expanded' : ''}`}
+            />
+          </button>
+          {advancedExpanded && (
+            <div className="accordion-content">
+              {/* Native audio helper */}
+              <AudioHelperSection appAudio={appAudio} />
 
-      {/* Native audio helper */}
-      <AudioHelperSection appAudio={appAudio} />
-
-      {/* Logs */}
-      <LogsSection lines={logLines} />
+              {/* Logs */}
+              <LogsSection lines={logLines} />
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-function formatTime(totalSeconds: number): string {
-  const hrs = Math.floor(totalSeconds / 3600);
-  const mins = Math.floor((totalSeconds % 3600) / 60);
-  const secs = totalSeconds % 60;
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return hrs > 0
-    ? `${pad(hrs)}:${pad(mins)}:${pad(secs)}`
-    : `${pad(mins)}:${pad(secs)}`;
-}
+

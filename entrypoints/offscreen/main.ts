@@ -13,6 +13,7 @@ import { ScreenRecorder } from '../../utils/recording';
 import { DEFAULT_AUDIO_SETTINGS, type AudioMixSettings } from '../../utils/types';
 import { StreamHealthMonitor, type StreamHealthEvent } from '../../utils/streamHealthMonitor';
 import { AudioHealthMonitor, type AudioHealthEvent } from '../../utils/audioHealthMonitor';
+import { ChunkStorage } from '../../utils/chunkStorage';
 
 let recorder: ScreenRecorder | null = null;
 let canvasRouter: CanvasRouter | null = null;
@@ -28,18 +29,43 @@ let baselineAudioDeviceIds = new Set<string>();
 
 let streamMonitor: StreamHealthMonitor | null = null;
 let audioMonitor: AudioHealthMonitor | null = null;
+let micSourceNode: MediaStreamAudioSourceNode | null = null;
+let micGainNode: GainNode | null = null;
+let systemSourceNode: MediaStreamAudioSourceNode | null = null;
+let systemGainNode: GainNode | null = null;
+let compressorNode: DynamicsCompressorNode | null = null;
+let dummyOscillatorNode: OscillatorNode | null = null;
+let dummyGainNode: GainNode | null = null;
 
 chrome.runtime.sendMessage({ type: 'OFFSCREEN_READY' }).catch(() => undefined);
 
 recorder = new ScreenRecorder({
-  onBlobReady: (blob) => {
-    if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
-    currentBlobUrl = URL.createObjectURL(blob);
-    chrome.runtime.sendMessage({
-      type: 'RECORDING_COMPLETE',
-      url: currentBlobUrl,
-      mimeType: blob.type,
-    });
+  onRecordingReady: async (sessionId, mimeType) => {
+    try {
+      console.log('[offscreen] assembling final blob for session:', sessionId);
+      const storage = new ChunkStorage();
+      await storage.initExisting(sessionId);
+      const blob = await storage.assembleBlob(mimeType);
+      console.log('[offscreen] blob assembled, size:', blob.size);
+
+      if (blob.size > 0) {
+        const blobUrl = URL.createObjectURL(blob);
+        chrome.runtime.sendMessage({
+          type: 'RECORDING_COMPLETE',
+          sessionId,
+          mimeType,
+          blobUrl,
+        });
+      } else {
+        throw new Error('Assembled blob is empty');
+      }
+    } catch (err: any) {
+      console.error('[offscreen] failed to assemble blob:', err);
+      chrome.runtime.sendMessage({
+        type: 'RECORDING_ERROR',
+        error: `Failed to assemble recording: ${err.message || String(err)}`,
+      });
+    }
   },
   onTimeUpdate: (seconds) => {
     chrome.runtime.sendMessage({ type: 'RECORDING_TICK', duration: seconds });
@@ -92,6 +118,33 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       void fallbackToDisplayMedia();
       sendResponse({ success: true });
       break;
+    case 'UPDATE_AUDIO_SETTINGS': {
+      const settings = message.audioSettings as AudioMixSettings;
+      if (mixAudioContext && mixAudioContext.state !== 'closed') {
+        const now = mixAudioContext.currentTime;
+        if (micGainNode) {
+          micGainNode.gain.setValueAtTime(micGainNode.gain.value, now);
+          micGainNode.gain.linearRampToValueAtTime(settings.micGain, now + 0.1);
+        }
+        if (systemGainNode) {
+          systemGainNode.gain.setValueAtTime(systemGainNode.gain.value, now);
+          systemGainNode.gain.linearRampToValueAtTime(settings.systemGain, now + 0.1);
+        }
+      }
+      sendResponse({ success: true });
+      break;
+    }
+    case 'CLEANUP_SESSION_STORAGE': {
+      const storage = new ChunkStorage();
+      storage.initExisting(message.sessionId)
+        .then(() => storage.cleanup())
+        .then(() => sendResponse({ success: true }))
+        .catch((err) => {
+          console.error('[offscreen] failed to cleanup session storage:', err);
+          sendResponse({ success: false, error: err.message });
+        });
+      return true;
+    }
   }
   return true;
 });
@@ -225,6 +278,9 @@ function reportAudioDeviceInventory(target: VirtualCaptureTarget): void {
 async function measureAudioRms(track: MediaStreamTrack, ms = 300): Promise<number> {
   const ctx = new AudioContext();
   try {
+    if (ctx.state === 'suspended') {
+      await ctx.resume().catch(() => undefined);
+    }
     const stream = new MediaStream([track]);
     const source = ctx.createMediaStreamSource(stream);
     const analyser = ctx.createAnalyser();
@@ -375,8 +431,10 @@ async function startCapture(message: {
   sessionId?: string;
   isContinuation?: boolean;
   initialDuration?: number;
+  os?: string;
 }): Promise<void> {
   const audioSettings = message.audioSettings ?? DEFAULT_AUDIO_SETTINGS;
+  const isLinux = message.os === 'linux' || /linux/i.test(navigator.userAgent);
   let mixResult: ReturnType<typeof mixAudioStreams> = null;
 
   try {
@@ -412,7 +470,7 @@ async function startCapture(message: {
 
         // Native mirror path uses the virtual sink — discard display-media audio
         // so we never accidentally record Chrome's loopback instead of pw-link mirror.
-        if (isNativeMirrorSurface(detectedSurface)) {
+        if (isNativeMirrorSurface(detectedSurface) && isLinux) {
           for (const t of screenStream.getAudioTracks()) {
             console.log('[offscreen] dropping display-media audio track (using mirror sink)');
             t.stop();
@@ -423,7 +481,7 @@ async function startCapture(message: {
     console.log('[offscreen] screen stream acquired');
 
     // Wait for native virtual device BEFORE starting recorder (mirror sink only).
-    if (isNativeMirrorSurface(detectedSurface)) {
+    if (isNativeMirrorSurface(detectedSurface) && isLinux) {
       console.log('[offscreen] waiting for mirror sink attach before recorder…');
       const attached = await waitForAppAudioStream(25_000);
       if (attached) {
@@ -440,7 +498,13 @@ async function startCapture(message: {
 
     if (message.includeMic) {
       try {
-        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          }
+        });
       } catch (err: any) {
         console.warn('[offscreen] microphone access denied:', err);
         chrome.runtime.sendMessage({
@@ -452,6 +516,12 @@ async function startCapture(message: {
 
     const videoTrack = screenStream.getVideoTracks()[0];
     if (!videoTrack) throw new Error('No video track found in screen capture stream');
+
+    // Video track ended (Stop sharing)
+    videoTrack.onended = () => {
+      console.log('[offscreen] Video track ended (Screen sharing stopped) — finalizng recording.');
+      void stopCapture();
+    };
 
     canvasRouter = new CanvasRouter({ width: 1920, height: 1080, fps: 30 });
     canvasRouter.setActiveSource(new MediaStream([videoTrack]));
@@ -475,7 +545,7 @@ async function startCapture(message: {
     streamMonitor.setVideoTrack(videoTrack);
 
     // For window/monitor: ONLY the mirror sink stream — never display-media or default mic.
-    const useMirrorSink = isNativeMirrorSurface(detectedSurface);
+    const useMirrorSink = isNativeMirrorSurface(detectedSurface) && isLinux;
     const systemAudioTrack = useMirrorSink
       ? appAudioStream?.getAudioTracks()[0]
       : appAudioStream?.getAudioTracks()[0] ?? screenStream.getAudioTracks()[0];
@@ -488,10 +558,42 @@ async function startCapture(message: {
     if (systemAudioTrack) {
       streamMonitor?.addAudioTrack(systemAudioTrack);
       audioMonitor?.addTrack(systemAudioTrack);
+
+      systemAudioTrack.onended = () => {
+        console.warn('[offscreen] System audio track ended.');
+        chrome.runtime.sendMessage({
+          type: 'RECORDING_WARNING',
+          warning: 'System audio capture ended. Recording continues without system audio.',
+        }).catch(() => undefined);
+      };
     }
     if (micAudioTrack) {
       streamMonitor?.addAudioTrack(micAudioTrack);
       audioMonitor?.addTrack(micAudioTrack);
+
+      micAudioTrack.onended = () => {
+        console.warn('[offscreen] Microphone track ended.');
+        chrome.runtime.sendMessage({
+          type: 'RECORDING_WARNING',
+          warning: 'Microphone track ended. Attempting to re-acquire...',
+        }).catch(() => undefined);
+      };
+      micAudioTrack.onmute = () => {
+        console.warn('[offscreen] Microphone track muted.');
+        chrome.runtime.sendMessage({
+          type: 'AUDIO_HEALTH_EVENT',
+          event: 'AUDIO_SILENT',
+          trackId: micAudioTrack.id
+        }).catch(() => undefined);
+      };
+      micAudioTrack.onunmute = () => {
+        console.log('[offscreen] Microphone track unmuted.');
+        chrome.runtime.sendMessage({
+          type: 'AUDIO_HEALTH_EVENT',
+          event: 'AUDIO_ACTIVE',
+          trackId: micAudioTrack.id
+        }).catch(() => undefined);
+      };
     }
 
     if (systemAudioTrack || micAudioTrack) {
@@ -506,6 +608,21 @@ async function startCapture(message: {
       if (mixResult?.mixedTrack) {
         finalStream.addTrack(mixResult.mixedTrack);
         mixAudioContext = mixResult.audioContext;
+        micSourceNode = mixResult.micSourceNode ?? null;
+        micGainNode = mixResult.micGainNode ?? null;
+        systemSourceNode = mixResult.systemSourceNode ?? null;
+        systemGainNode = mixResult.systemGainNode ?? null;
+        compressorNode = mixResult.compressorNode ?? null;
+        dummyOscillatorNode = mixResult.dummyOscillatorNode ?? null;
+        dummyGainNode = mixResult.dummyGainNode ?? null;
+
+        // Auto-resume safeguard
+        mixAudioContext.onstatechange = () => {
+          if (mixAudioContext && mixAudioContext.state === 'suspended' && recorder && recorder.getState() === 'recording') {
+            console.log('[offscreen] AudioContext suspended unexpectedly, resuming...');
+            mixAudioContext.resume().catch(console.error);
+          }
+        };
       }
       if (systemAudioTrack) additionalTracksToCleanup.push(systemAudioTrack);
       if (micStream) additionalTracksToCleanup.push(...micStream.getTracks());
@@ -608,10 +725,139 @@ async function stopCapture(): Promise<void> {
   cleanupCaptureResources();
 }
 
+async function handleDeviceChange(): Promise<void> {
+  if (!recorder || recorder.getState() === 'inactive' || !micStream || !mixAudioContext) {
+    return;
+  }
+
+  const micTrack = micStream.getAudioTracks()[0];
+  if (!micTrack || micTrack.readyState === 'ended') {
+    console.log('[offscreen] Microphone device disconnected, attempting to re-acquire default mic stream...');
+    chrome.runtime.sendMessage({
+      type: 'RECORDING_WARNING',
+      warning: 'Microphone disconnected! Attempting to re-acquire audio device...'
+    }).catch(() => undefined);
+
+    micStream.getTracks().forEach((t) => {
+      t.onended = null;
+      t.onmute = null;
+      t.onunmute = null;
+      t.stop();
+    });
+
+    try {
+      const newMicStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        }
+      });
+      const newMicTrack = newMicStream.getAudioTracks()[0];
+
+      if (newMicTrack && mixAudioContext && mixAudioContext.state !== 'closed') {
+        console.log('[offscreen] Microphone re-acquired successfully. Re-attaching to mixer...');
+        
+        micStream = newMicStream;
+
+        // Gán lại các event handlers cho mic track mới
+        newMicTrack.onended = () => {
+          console.warn('[offscreen] Re-acquired microphone track ended.');
+          chrome.runtime.sendMessage({
+            type: 'RECORDING_WARNING',
+            warning: 'Microphone track ended. Attempting to re-acquire...',
+          }).catch(() => undefined);
+        };
+        newMicTrack.onmute = () => {
+          console.warn('[offscreen] Re-acquired microphone track muted.');
+          chrome.runtime.sendMessage({
+            type: 'AUDIO_HEALTH_EVENT',
+            event: 'AUDIO_SILENT',
+            trackId: newMicTrack.id
+          }).catch(() => undefined);
+        };
+        newMicTrack.onunmute = () => {
+          console.log('[offscreen] Re-acquired microphone track unmuted.');
+          chrome.runtime.sendMessage({
+            type: 'AUDIO_HEALTH_EVENT',
+            event: 'AUDIO_ACTIVE',
+            trackId: newMicTrack.id
+          }).catch(() => undefined);
+        };
+
+        if (micGainNode) {
+          // Fade-out mượt mà gain hiện tại về 0 trước khi cắm nguồn mới
+          const now = mixAudioContext.currentTime;
+          const targetGain = micGainNode.gain.value;
+          micGainNode.gain.setValueAtTime(targetGain, now);
+          micGainNode.gain.linearRampToValueAtTime(0, now + 0.05); // 50ms fade out
+
+          setTimeout(() => {
+            try {
+              micSourceNode?.disconnect();
+            } catch (e) {
+              console.warn('[offscreen] failed to disconnect old micSourceNode:', e);
+            }
+
+            if (mixAudioContext && mixAudioContext.state !== 'closed') {
+              micSourceNode = mixAudioContext.createMediaStreamSource(newMicStream);
+              if (micGainNode) {
+                micSourceNode.connect(micGainNode);
+                const now2 = mixAudioContext.currentTime;
+                micGainNode.gain.setValueAtTime(0, now2);
+                micGainNode.gain.linearRampToValueAtTime(targetGain, now2 + 0.1); // 100ms fade in
+              }
+            }
+          }, 60);
+        } else {
+          try {
+            micSourceNode?.disconnect();
+          } catch (e) {}
+          micSourceNode = mixAudioContext.createMediaStreamSource(newMicStream);
+        }
+
+        streamMonitor?.addAudioTrack(newMicTrack);
+        audioMonitor?.addTrack(newMicTrack);
+
+        chrome.runtime.sendMessage({
+          type: 'AUDIO_HEALTH_EVENT',
+          event: 'AUDIO_ACTIVE',
+          trackId: newMicTrack.id
+        }).catch(() => undefined);
+      } else {
+        throw new Error('No audio track in re-acquired mic stream');
+      }
+    } catch (err: any) {
+      console.error('[offscreen] failed to re-acquire microphone:', err);
+      chrome.runtime.sendMessage({
+        type: 'AUDIO_HEALTH_EVENT',
+        event: 'AUDIO_SOURCE_LOST'
+      }).catch(() => undefined);
+      chrome.runtime.sendMessage({
+        type: 'RECORDING_WARNING',
+        warning: 'Failed to re-acquire microphone. Recording audio is unavailable.'
+      }).catch(() => undefined);
+    }
+  }
+}
+
 function cleanupPartialCapture(audioContext: AudioContext | null): void {
-  screenStream?.getTracks().forEach((t) => t.stop());
-  micStream?.getTracks().forEach((t) => t.stop());
-  appAudioStream?.getTracks().forEach((t) => t.stop());
+  // Hủy bỏ handlers của tracks để chống memory leaks và stop các tracks
+  screenStream?.getTracks().forEach((t) => {
+    t.onended = null;
+    t.stop();
+  });
+  micStream?.getTracks().forEach((t) => {
+    t.onended = null;
+    t.onmute = null;
+    t.onunmute = null;
+    t.stop();
+  });
+  appAudioStream?.getTracks().forEach((t) => {
+    t.onended = null;
+    t.stop();
+  });
+
   screenStream = null;
   micStream = null;
   appAudioStream = null;
@@ -623,18 +869,64 @@ function cleanupPartialCapture(audioContext: AudioContext | null): void {
   audioMonitor?.destroy();
   audioMonitor = null;
 
+  // Ngắt kết nối tường minh Web Audio Graph
+  try {
+    micSourceNode?.disconnect();
+  } catch (e) {}
+  try {
+    systemSourceNode?.disconnect();
+  } catch (e) {}
+  try {
+    micGainNode?.disconnect();
+  } catch (e) {}
+  try {
+    systemGainNode?.disconnect();
+  } catch (e) {}
+  try {
+    compressorNode?.disconnect();
+  } catch (e) {}
+  try {
+    dummyOscillatorNode?.stop();
+    dummyOscillatorNode?.disconnect();
+  } catch (e) {}
+  try {
+    dummyGainNode?.disconnect();
+  } catch (e) {}
+
+  micSourceNode = null;
+  micGainNode = null;
+  systemSourceNode = null;
+  systemGainNode = null;
+  compressorNode = null;
+  dummyOscillatorNode = null;
+  dummyGainNode = null;
+
   canvasRouter?.destroy();
   canvasRouter = null;
-  audioContext?.close().catch(console.error);
+
+  if (audioContext && audioContext.state !== 'closed') {
+    audioContext.close().catch(console.error);
+  }
   mixAudioContext = null;
 }
 
 function cleanupCaptureResources(): void {
+  // Hủy bỏ handlers của tracks để chống memory leaks và stop các tracks
   screenStream?.getTracks().forEach((t) => {
+    t.onended = null;
     if (t.readyState !== 'ended') t.stop();
   });
-  micStream?.getTracks().forEach((t) => t.stop());
-  appAudioStream?.getTracks().forEach((t) => t.stop());
+  micStream?.getTracks().forEach((t) => {
+    t.onended = null;
+    t.onmute = null;
+    t.onunmute = null;
+    t.stop();
+  });
+  appAudioStream?.getTracks().forEach((t) => {
+    t.onended = null;
+    t.stop();
+  });
+
   screenStream = null;
   micStream = null;
   appAudioStream = null;
@@ -646,8 +938,43 @@ function cleanupCaptureResources(): void {
   audioMonitor?.destroy();
   audioMonitor = null;
 
+  // Ngắt kết nối tường minh Web Audio Graph
+  try {
+    micSourceNode?.disconnect();
+  } catch (e) {}
+  try {
+    systemSourceNode?.disconnect();
+  } catch (e) {}
+  try {
+    micGainNode?.disconnect();
+  } catch (e) {}
+  try {
+    systemGainNode?.disconnect();
+  } catch (e) {}
+  try {
+    compressorNode?.disconnect();
+  } catch (e) {}
+  try {
+    dummyOscillatorNode?.stop();
+    dummyOscillatorNode?.disconnect();
+  } catch (e) {}
+  try {
+    dummyGainNode?.disconnect();
+  } catch (e) {}
+
+  micSourceNode = null;
+  micGainNode = null;
+  systemSourceNode = null;
+  systemGainNode = null;
+  compressorNode = null;
+  dummyOscillatorNode = null;
+  dummyGainNode = null;
+
   canvasRouter?.destroy();
   canvasRouter = null;
-  mixAudioContext?.close().catch(console.error);
+
+  if (mixAudioContext && mixAudioContext.state !== 'closed') {
+    mixAudioContext.close().catch(console.error);
+  }
   mixAudioContext = null;
 }

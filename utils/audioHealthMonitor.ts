@@ -60,6 +60,9 @@ export class AudioHealthMonitor {
   }
 
   private checkSignals(): void {
+    if (this.audioContext && this.audioContext.state === 'suspended') {
+      this.audioContext.resume().catch((err) => console.warn('[AudioHealthMonitor] Failed to resume AudioContext:', err));
+    }
     for (const [trackId, analyser] of this.analyserNodes.entries()) {
       const data = new Float32Array(analyser.fftSize);
       analyser.getFloatTimeDomainData(data);

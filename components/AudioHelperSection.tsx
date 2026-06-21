@@ -128,21 +128,23 @@ export function AudioHelperSection({ appAudio }: AudioHelperSectionProps) {
   const statusColor = helperStatusColor(appAudio);
 
   return (
-    <section className="sp-section">
-      <div className="sp-section-header">
-        <div className="sp-section-title">Audio Helper</div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div className="sp-helper-header">
+        <span style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-muted)' }}>
+          Native Audio Status
+        </span>
         <span className={`sp-status-badge sp-status-badge--${statusColor}`}>
           {helperStatusLabel(appAudio)}
         </span>
       </div>
 
       {isNotInstalled && (
-        <div className="sp-alert sp-alert--warn">
-          <strong>Native Audio Helper not installed.</strong>
-          <ol style={{ margin: '4px 0 0', paddingLeft: 16, fontSize: '0.85em' }}>
-            <li>Open a terminal in the extension folder</li>
+        <div className="sp-alert sp-alert--warn" style={{ fontSize: '11px' }}>
+          <strong>Helper tool not installed</strong>
+          <ol style={{ margin: '4px 0 0', paddingLeft: 16, lineHeight: 1.4 }}>
+            <li>Open terminal in the extension folder</li>
             <li>Run: <code>bash native-helper/install.sh</code></li>
-            <li>Reload Chrome, then click Re-check below</li>
+            <li>Reload Chrome and click Re-check below</li>
           </ol>
         </div>
       )}
@@ -152,9 +154,8 @@ export function AudioHelperSection({ appAudio }: AudioHelperSectionProps) {
       )}
 
       {isConnected && appAudio.sessionStatus === 'idle' && (
-        <div className="sp-alert sp-alert--info sp-alert--sm">
-          Virtual device is created after you pick <strong>Application Window</strong> or{' '}
-          <strong>Entire Screen</strong> in the share picker (not Chrome Tab).
+        <div className="sp-alert sp-alert--info sp-alert--sm" style={{ fontSize: '11px' }}>
+          Virtual audio device is active. Start screen or window sharing to enable automatic mirroring.
         </div>
       )}
 
@@ -199,6 +200,9 @@ export function AudioHelperSection({ appAudio }: AudioHelperSectionProps) {
       {/* Controls — app list + mirror shown only when connected */}
       {isConnected && (
         <div className="sp-audio-controls">
+          <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.4px' }}>
+            Add application audio to mix
+          </div>
           <div className="sp-audio-controls-row">
             <select
               className="sp-select"
@@ -209,7 +213,7 @@ export function AudioHelperSection({ appAudio }: AudioHelperSectionProps) {
               disabled={apps.length === 0 || busy}
             >
               {apps.length === 0 && (
-                <option value="">— no apps found —</option>
+                <option value="">— no apps playing audio —</option>
               )}
               {apps.map((a) => (
                 <option key={`${a.nodeId}`} value={a.pid ?? ''}>
@@ -222,8 +226,9 @@ export function AudioHelperSection({ appAudio }: AudioHelperSectionProps) {
               onClick={refreshApps}
               disabled={busy}
               title="Refresh app list"
+              style={{ padding: '6px 10px' }}
             >
-              ↻
+              Refresh
             </button>
           </div>
 
@@ -232,21 +237,23 @@ export function AudioHelperSection({ appAudio }: AudioHelperSectionProps) {
               className="sp-btn sp-btn--primary sp-btn--sm"
               onClick={handleMirror}
               disabled={busy || selectedPid == null}
+              style={{ width: '100%', justifyContent: 'center' }}
             >
-              Mirror audio
+              Mirror App Audio
             </button>
           </div>
         </div>
       )}
 
-      {/* Re-check always visible so the user can retry after any failure */}
-      <div className="sp-audio-controls-row" style={{ marginTop: 6 }}>
+      {/* Re-check actions */}
+      <div className="sp-audio-controls-row" style={{ marginTop: 4 }}>
         <button
           className="sp-btn sp-btn--secondary sp-btn--sm"
           onClick={pingHost}
           disabled={busy}
+          style={{ flex: 1, justifyContent: 'center' }}
         >
-          Re-check
+          Re-check Connection
         </button>
         {isConnected && (
           <button
@@ -254,14 +261,15 @@ export function AudioHelperSection({ appAudio }: AudioHelperSectionProps) {
             onClick={diagnoseCapture}
             disabled={busy}
             title="Compare pactl sources vs Chrome visibility"
+            style={{ flex: 1, justifyContent: 'center' }}
           >
-            Diagnose audio
+            Diagnose Audio
           </button>
         )}
       </div>
 
       {diagnosis && (
-        <pre className="sp-alert sp-alert--info sp-alert--sm" style={{ fontSize: '0.75em', whiteSpace: 'pre-wrap' }}>
+        <pre className="sp-alert sp-alert--info sp-alert--sm" style={{ fontSize: '10px', fontFamily: 'monospace', whiteSpace: 'pre-wrap', padding: '6px 8px' }}>
           {diagnosis}
         </pre>
       )}
@@ -269,6 +277,6 @@ export function AudioHelperSection({ appAudio }: AudioHelperSectionProps) {
       {localError && (
         <div className="sp-alert sp-alert--error sp-alert--sm">{localError}</div>
       )}
-    </section>
+    </div>
   );
 }
