@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { AppAudioState, AudioSession } from '../utils/types';
 import type { AudioApplication } from '../utils/nativeAudio';
+import { StatusBadge } from './StatusBadge';
 
 interface AudioHelperSectionProps {
   appAudio: AppAudioState;
@@ -130,12 +131,13 @@ export function AudioHelperSection({ appAudio }: AudioHelperSectionProps) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div className="sp-helper-header">
-        <span style={{ fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-muted)' }}>
+        <span style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', color: 'var(--text-secondary)', letterSpacing: '0.05em' }}>
           Native Audio Status
         </span>
-        <span className={`sp-status-badge sp-status-badge--${statusColor}`}>
-          {helperStatusLabel(appAudio)}
-        </span>
+        <StatusBadge
+          status={appAudio.nativeHelperStatus === 'connected' ? 'connected' : (appAudio.nativeHelperStatus === 'not_installed' || appAudio.nativeHelperStatus === 'error' ? 'error' : 'idle')}
+          label={helperStatusLabel(appAudio)}
+        />
       </div>
 
       {isNotInstalled && (

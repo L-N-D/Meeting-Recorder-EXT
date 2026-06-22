@@ -227,6 +227,12 @@ function onNativeHostDisconnect(err?: string): void {
 let nativeConnectInFlight: Promise<boolean> | null = null;
 
 async function ensureNativeConnected(): Promise<boolean> {
+  const localSettings = await chrome.storage.local.get('enableNativeHelper');
+  if (localSettings.enableNativeHelper === false) {
+    setNativeHelperStatus('not_installed', 'Native helper disabled in settings');
+    return false;
+  }
+
   if (nativeConnectInFlight) return nativeConnectInFlight;
 
   nativeConnectInFlight = (async () => {
@@ -581,6 +587,15 @@ export default defineBackground(() => {
         focusMode = message.focusMode ?? false;
         audioSettings = message.audioSettings ?? { ...DEFAULT_AUDIO_SETTINGS };
         startRecordingFlow(message.startingTabId);
+        sendResponse({ success: true });
+        break;
+
+      case 'TOGGLE_NATIVE_HELPER':
+        if (!message.enabled) {
+          void doCleanupNativeAudio();
+        } else {
+          void ensureNativeConnected();
+        }
         sendResponse({ success: true });
         break;
 

@@ -2,6 +2,7 @@ import { Camera, Focus, Globe, Mic, Volume2 } from 'lucide-react';
 import { Icon } from './Icon';
 import type { AudioMixSettings, RecordingState } from '../utils/types';
 import { MicLevelMeter } from './MicLevelMeter';
+import { SourceCard } from './SourceCard';
 
 interface SourcesSectionProps {
   recordingState: RecordingState;
@@ -42,74 +43,47 @@ export function SourcesSection({
 
   return (
     <section className="sp-section">
-      <div className="sp-section-title">Sources</div>
+      <div className="sp-section-title">Capture Sources</div>
 
-      <div className="sources-grid">
-        <div
-          className={`source-card ${includeMic ? 'active' : ''}`}
-          onClick={() => isIdle && onToggleMic()}
-          role="button"
-          tabIndex={0}
-          aria-pressed={includeMic}
-          style={{ opacity: !isIdle ? 0.6 : 1, cursor: !isIdle ? 'not-allowed' : 'pointer' }}
-          onKeyDown={(e) => {
-            if (isIdle && (e.key === ' ' || e.key === 'Enter')) {
-              e.preventDefault();
-              onToggleMic();
-            }
-          }}
-        >
-          <Icon icon={Mic} size={18} className="source-card-icon" />
-          <span className="source-card-title">Microphone</span>
-          <span className="source-card-status">{includeMic ? 'Active' : 'Off'}</span>
-        </div>
+      <div className="sources-list" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <SourceCard
+          type="mic"
+          label="Microphone"
+          status={includeMic ? 'Active' : 'Off'}
+          active={includeMic}
+          disabled={!isIdle}
+          onClick={onToggleMic}
+          icon={Mic}
+        />
 
-        <div
-          className={`source-card ${includeCam ? 'active' : ''}`}
-          onClick={() => isIdle && onToggleCam()}
-          role="button"
-          tabIndex={0}
-          aria-pressed={includeCam}
-          style={{ opacity: !isIdle ? 0.6 : 1, cursor: !isIdle ? 'not-allowed' : 'pointer' }}
-          onKeyDown={(e) => {
-            if (isIdle && (e.key === ' ' || e.key === 'Enter')) {
-              e.preventDefault();
-              onToggleCam();
-            }
-          }}
-        >
-          <Icon icon={Camera} size={18} className="source-card-icon" />
-          <span className="source-card-title">Camera</span>
-          <span className="source-card-status">{includeCam ? 'Active' : 'Off'}</span>
-        </div>
+        <SourceCard
+          type="camera"
+          label="Camera Overlay"
+          status={includeCam ? 'Active' : 'Off'}
+          active={includeCam}
+          disabled={!isIdle}
+          onClick={onToggleCam}
+          icon={Camera}
+        />
 
-        <div
-          className={`source-card ${focusMode ? 'active' : ''}`}
-          onClick={() => isIdle && onToggleFocusMode()}
-          role="button"
-          tabIndex={0}
-          aria-pressed={focusMode}
-          style={{ opacity: !isIdle ? 0.6 : 1, cursor: !isIdle ? 'not-allowed' : 'pointer' }}
-          onKeyDown={(e) => {
-            if (isIdle && (e.key === ' ' || e.key === 'Enter')) {
-              e.preventDefault();
-              onToggleFocusMode();
-            }
-          }}
-        >
-          <Icon icon={Focus} size={18} className="source-card-icon" />
-          <span className="source-card-title">Focus 1-1</span>
-          <span className="source-card-status">{focusMode ? 'Active' : 'Off'}</span>
-        </div>
+        <SourceCard
+          type="focus"
+          label="Focus 1-1 Mode"
+          status={focusMode ? 'Active' : 'Off'}
+          active={focusMode}
+          disabled={!isIdle}
+          onClick={onToggleFocusMode}
+          icon={Focus}
+        />
       </div>
 
       {focusMode && isIdle && (
         <>
-          <p className="sp-hint">
+          <p className="sp-hint" style={{ marginTop: 8 }}>
             Focus records the tab you are viewing. Switch tabs and press <strong>Alt+Shift+F</strong> (or right-click → "Add this tab to Focus recording") to target it.
           </p>
 
-          <div className="sp-tabs-box">
+          <div className="sp-tabs-box" style={{ marginTop: 8 }}>
             <div className="sp-tabs-header">
               <span className="sp-tabs-title">
                 Monitored tabs
@@ -161,10 +135,14 @@ export function SourcesSection({
         </>
       )}
 
-      {includeMic && <MicLevelMeter enabled={recordingState === 'recording' || isIdle} />}
+      {includeMic && (
+        <div style={{ marginTop: 8 }}>
+          <MicLevelMeter enabled={recordingState === 'recording' || isIdle} />
+        </div>
+      )}
 
       {includeMic && (
-        <div className="sp-audio-mix">
+        <div className="sp-audio-mix" style={{ marginTop: 12 }}>
           <div className="sp-section-title sp-section-title--sm">Audio mix</div>
           <div className="sp-range-label">
             <div className="sp-range-row">
@@ -172,7 +150,7 @@ export function SourcesSection({
                 <Icon icon={Mic} size={13} />
                 Mic Gain
               </span>
-              <span>{audioSettings.micGain.toFixed(1)}x</span>
+              <span className="font-mono">{audioSettings.micGain.toFixed(1)}x</span>
             </div>
             <input
               type="range" min="0.5" max="2" step="0.1"
@@ -188,7 +166,7 @@ export function SourcesSection({
                 <Icon icon={Volume2} size={13} />
                 System Audio
               </span>
-              <span>{audioSettings.systemGain.toFixed(1)}x</span>
+              <span className="font-mono">{audioSettings.systemGain.toFixed(1)}x</span>
             </div>
             <input
               type="range" min="0.3" max="1.5" step="0.1"

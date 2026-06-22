@@ -4,6 +4,10 @@ import { AudioHelperSection } from '../../components/AudioHelperSection';
 import { LogsSection } from '../../components/LogsSection';
 import { RecordingControls } from '../../components/RecordingControls';
 import { SourcesSection } from '../../components/SourcesSection';
+import { StatusBadge } from '../../components/StatusBadge';
+import { SourceCard } from '../../components/SourceCard';
+import { BottomNav, type TabType } from '../../components/BottomNav';
+import { MicLevelMeter } from '../../components/MicLevelMeter';
 import {
   DEFAULT_APP_AUDIO_STATE,
   DEFAULT_AUDIO_SETTINGS,
@@ -19,7 +23,22 @@ import {
 } from '../../utils/audioCapturePermission';
 import { ChunkStorage } from '../../utils/chunkStorage';
 import { fixWebmDuration } from '../../utils/webmDurationFix';
-import { AlertOctagon, Download, Trash2, Loader, AlertTriangle, AlertCircle, RefreshCw, Settings, ChevronDown, Mic, Camera } from 'lucide-react';
+import {
+  AlertOctagon,
+  Download,
+  Trash2,
+  Loader,
+  AlertTriangle,
+  AlertCircle,
+  RefreshCw,
+  Settings,
+  ChevronDown,
+  Mic,
+  Camera,
+  Monitor,
+  Focus,
+  History,
+} from 'lucide-react';
 import { formatTime } from '../../utils/format';
 
 const CAPTURABLE_URL_PREFIXES = ['http://', 'https://'];
@@ -32,6 +51,10 @@ function isCapturableTab(tab: chrome.tabs.Tab): boolean {
 export default function App() {
   // ---- Recording state (synced from background) ----------------------------
   const [recordingState, setRecordingState] = useState<RecordingState>('idle');
+  const [activeTab, setActiveTab] = useState<TabType>('dashboard');
+  const [devMode, setDevMode] = useState(false);
+  const [enableNativeHelper, setEnableNativeHelper] = useState(true);
+  const [userOS, setUserOS] = useState<'Linux' | 'macOS' | 'Windows' | 'Unknown'>('Unknown');
   const [duration, setDuration] = useState(0);
   const [includeMic, setIncludeMic] = useState(true);
   const [includeCam, setIncludeCam] = useState(false);
@@ -92,6 +115,44 @@ export default function App() {
       }).catch(() => undefined);
     }
   }, []);
+
+  // Persist and load settings + detect OS
+  useEffect(() => {
+    const ua = navigator.userAgent.toLowerCase();
+    if (ua.includes('linux')) {
+      setUserOS('Linux');
+    } else if (ua.includes('macintosh') || ua.includes('mac os x')) {
+      setUserOS('macOS');
+    } else if (ua.includes('windows')) {
+      setUserOS('Windows');
+    } else {
+      setUserOS('Unknown');
+    }
+
+    chrome.storage.local.get(['devMode', 'enableNativeHelper'], (result) => {
+      if (chrome.runtime.lastError) return;
+      if (result.devMode !== undefined) setDevMode(Boolean(result.devMode));
+      if (result.enableNativeHelper !== undefined) {
+        setEnableNativeHelper(Boolean(result.enableNativeHelper));
+      } else {
+        const isLinux = ua.includes('linux');
+        setEnableNativeHelper(isLinux);
+      }
+    });
+  }, []);
+
+  const handleToggleDevMode = () => {
+    const next = !devMode;
+    setDevMode(next);
+    chrome.storage.local.set({ devMode: next });
+  };
+
+  const handleToggleNativeHelper = () => {
+    const next = !enableNativeHelper;
+    setEnableNativeHelper(next);
+    chrome.storage.local.set({ enableNativeHelper: next });
+    chrome.runtime.sendMessage({ type: 'TOGGLE_NATIVE_HELPER', enabled: next });
+  };
 
   const openPermissionTab = (audio: boolean, video: boolean) => {
     const url = chrome.runtime.getURL(`permission.html?audio=${audio}&video=${video}`);
@@ -569,20 +630,38 @@ export default function App() {
     (includeCam && camPermissionState !== 'granted')
   );
 
+  const rootClass = `sp-root ${recordingState !== 'idle' && recordingState !== 'interrupted' ? `sp-root--${recordingState}` : ''}`;
+
   return (
-    <div className="sp-root">
+    <div className={rootClass}>
       {/* Header */}
-      <header className="sp-header">
+      <header className="sp-header" style={recordingState !== 'idle' && recordingState !== 'interrupted' ? { background: 'rgba(239, 68, 68, 0.05)', borderBottom: '1px solid rgba(239, 68, 68, 0.15)' } : undefined}>
         <span className="sp-title">
           <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)' }} />
-          EXT Recorder
+          CaptureOS
         </span>
-        {(recordingState === 'recording' || recordingState === 'paused') && (
-          <span className="sp-header-timer">
-            <span className={`sp-dot ${recordingState === 'recording' ? 'sp-dot--pulse' : 'sp-dot--paused'}`} />
-            {formatTime(duration)} / 30:00
-          </span>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {(recordingState === 'recording' || recordingState === 'paused') && (
+            <>
+              <span className="sp-header-timer">
+                <span className={`sp-dot ${recordingState === 'recording' ? 'sp-dot--pulse' : 'sp-dot--paused'}`} />
+                {formatTime(duration)}
+              </span>
+              <button
+                className="sp-header-stop-btn"
+                onClick={handleStop}
+                title="Stop Capture Session"
+                type="button"
+              >
+                Stop
+              </button>
+            </>
+          )}
+          <StatusBadge
+            status={recordingState !== 'idle' ? recordingState : (appAudio.nativeHelperStatus === 'connected' ? 'connected' : 'idle')}
+            label={recordingState !== 'idle' ? undefined : (appAudio.nativeHelperStatus === 'connected' ? 'Connected' : 'Ready')}
+          />
+        </div>
       </header>
 
       {infoMessage && (
@@ -793,43 +872,226 @@ export default function App() {
         </section>
       ) : (
         <>
-          {/* Sources */}
-          <SourcesSection
-            recordingState={recordingState}
-            includeMic={includeMic}
-            includeCam={includeCam}
-            focusMode={focusMode}
-            audioSettings={audioSettings}
-            onToggleMic={handleToggleMic}
-            onToggleCam={handleToggleCam}
-            onToggleFocusMode={() => setFocusMode((v) => !v)}
-            onAudioSettingsChange={handleAudioSettingsChange}
-            tabsList={tabsList}
-            selectedTabIds={selectedTabIds}
-            activeTabId={activeTabId}
-            onToggleTabSelection={(id) =>
-              setSelectedTabIds((prev) =>
-                prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
-              )
-            }
-            onSelectAllTabs={() => setTabsList((t) => (setSelectedTabIds(t.map((x) => x.id!)), t))}
-            onClearTabSelection={() => setSelectedTabIds([])}
-          />
+          {/* Main content according to active tab and state */}
+          {recordingState !== 'idle' ? (
+            /* Screen 3: Recording Dashboard (Active state) */
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, padding: '16px 18px', flex: 1 }}>
+              <div className="sp-section-title">Active Control Panel</div>
+              <RecordingControls
+                recordingState={recordingState}
+                duration={duration}
+                error={error}
+                showArmCurrentTab={focusMode && activeTabCapturable && !activeTabArmed}
+                onStart={handleStart}
+                onStop={handleStop}
+                onPause={handlePause}
+                onResume={handleResume}
+                onArmCurrentTab={handleArmCurrentTab}
+                onDismissError={() => setError(null)}
+              />
 
-          {/* Recording controls */}
-          <RecordingControls
-            recordingState={recordingState}
-            duration={duration}
-            error={error}
-            showArmCurrentTab={focusMode && activeTabCapturable && !activeTabArmed}
-            onStart={handleStart}
-            onStop={handleStop}
-            onPause={handlePause}
-            onResume={handleResume}
-            onArmCurrentTab={handleArmCurrentTab}
-            onDismissError={() => setError(null)}
-          />
+              <div className="sp-section-title" style={{ marginTop: 8 }}>Active Sources</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <SourceCard
+                  type="screen"
+                  label="Screen / Window Share"
+                  status="Capturing"
+                  active={true}
+                  icon={Monitor}
+                />
+
+                {includeMic && (
+                  <SourceCard
+                    type="mic"
+                    label="Microphone Audio"
+                    status="Active"
+                    active={true}
+                    icon={Mic}
+                  >
+                    <MicLevelMeter enabled={true} />
+                  </SourceCard>
+                )}
+
+                {includeCam && (
+                  <SourceCard
+                    type="camera"
+                    label="Camera Overlay"
+                    status="Active"
+                    active={true}
+                    icon={Camera}
+                  />
+                )}
+
+                {focusMode && (
+                  <SourceCard
+                    type="focus"
+                    label="Focus 1-1 Following"
+                    status={activeTabArmed ? "Following" : "Not Armed"}
+                    active={activeTabArmed}
+                    warning={!activeTabArmed}
+                    icon={Focus}
+                  />
+                )}
+              </div>
+            </div>
+          ) : (
+            /* Idle tabs configuration */
+            <>
+              {activeTab === 'dashboard' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12, padding: '16px 18px', flex: 1 }}>
+                  <div className="sp-section-title">Configuration Summary</div>
+                  <div style={{ background: 'var(--bg-surface)', border: '1px solid var(--border-color)', padding: 10, borderRadius: '6px', fontSize: '11px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>Microphone</span>
+                      <StatusBadge status={includeMic ? 'active' : 'idle'} label={includeMic ? 'Enabled' : 'Disabled'} />
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>Camera Overlay</span>
+                      <StatusBadge status={includeCam ? 'active' : 'idle'} label={includeCam ? 'Enabled' : 'Disabled'} />
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>Focus 1-1 Mode</span>
+                      <StatusBadge status={focusMode ? 'active' : 'idle'} label={focusMode ? 'Enabled' : 'Disabled'} />
+                    </div>
+                  </div>
+                  <RecordingControls
+                    recordingState={recordingState}
+                    duration={duration}
+                    error={error}
+                    onStart={handleStart}
+                    onStop={handleStop}
+                    onPause={handlePause}
+                    onResume={handleResume}
+                    onDismissError={() => setError(null)}
+                  />
+                </div>
+              )}
+
+              {activeTab === 'sources' && (
+                <SourcesSection
+                  recordingState={recordingState}
+                  includeMic={includeMic}
+                  includeCam={includeCam}
+                  focusMode={focusMode}
+                  audioSettings={audioSettings}
+                  onToggleMic={handleToggleMic}
+                  onToggleCam={handleToggleCam}
+                  onToggleFocusMode={() => setFocusMode((v) => !v)}
+                  onAudioSettingsChange={handleAudioSettingsChange}
+                  tabsList={tabsList}
+                  selectedTabIds={selectedTabIds}
+                  activeTabId={activeTabId}
+                  onToggleTabSelection={(id) =>
+                    setSelectedTabIds((prev) =>
+                      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+                    )
+                  }
+                  onSelectAllTabs={() => setTabsList((t) => (setSelectedTabIds(t.map((x) => x.id!)), t))}
+                  onClearTabSelection={() => setSelectedTabIds([])}
+                />
+              )}
+
+              {activeTab === 'settings' && (
+                <div className="sp-section" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                  <div className="sp-section-title">Presets & Profiles</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <div className="source-card source-card--active" style={{ cursor: 'default' }}>
+                      <div className="source-card-header">
+                        <div className="source-card-title-group">
+                          <span className="source-card-title">Meeting Mode Preset</span>
+                        </div>
+                        <StatusBadge status="active" label="Active" />
+                      </div>
+                    </div>
+                    <div className="source-card source-card--disabled" style={{ cursor: 'default' }}>
+                      <div className="source-card-header">
+                        <div className="source-card-title-group">
+                          <span className="source-card-title">Medical Consultation</span>
+                        </div>
+                        <StatusBadge status="coming_soon" label="Coming Soon" />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="sp-section-title">System Settings</div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '10px 12px' }}>
+                    <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-secondary)' }}>System Platform</span>
+                    <span className="os-badge">OS: {userOS}</span>
+                  </div>
+
+                  <div className="settings-toggle-group">
+                    <div className="sp-switch-row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-primary)' }}>Native Helper Connection</span>
+                        <span style={{ fontSize: '9px', color: 'var(--text-secondary)' }}>Use local agent for Linux loopback audio</span>
+                      </div>
+                      <label className="sp-switch">
+                        <input
+                          type="checkbox"
+                          checked={enableNativeHelper}
+                          onChange={handleToggleNativeHelper}
+                        />
+                        <span className="sp-slider" />
+                      </label>
+                    </div>
+
+                    <div className="sp-switch-row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '1px solid rgba(255,255,255,0.04)', paddingTop: 8, marginTop: 8 }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                        <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-primary)' }}>Developer Debug Mode</span>
+                        <span style={{ fontSize: '9px', color: 'var(--text-secondary)' }}>Show diagnostic telemetry and runtime logs</span>
+                      </div>
+                      <label className="sp-switch">
+                        <input
+                          type="checkbox"
+                          checked={devMode}
+                          onChange={handleToggleDevMode}
+                        />
+                        <span className="sp-slider" />
+                      </label>
+                    </div>
+                  </div>
+
+                  {enableNativeHelper ? (
+                    <AudioHelperSection appAudio={appAudio} />
+                  ) : (
+                    <div className="source-card source-card--disabled" style={{ cursor: 'default' }}>
+                      <div className="source-card-header">
+                        <div className="source-card-title-group">
+                          <span className="source-card-title">Native Helper Disabled</span>
+                        </div>
+                        <StatusBadge status="disabled" label="Off" />
+                      </div>
+                      <p style={{ fontSize: '10.5px', color: 'var(--text-secondary)', lineHeight: 1.4, margin: '2px 0 0' }}>
+                        Native helper audio capture is turned off in Settings. System audio sharing is disabled.
+                      </p>
+                    </div>
+                  )}
+
+                  {devMode && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
+                      <div className="sp-section-title">Diagnostic Logs</div>
+                      <LogsSection lines={logLines} />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeTab === 'history' && (
+                <div className="sp-section" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '300px', textAlign: 'center', gap: 12 }}>
+                  <History size={48} className="history-empty-icon" />
+                  <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>No Recorded Sessions</div>
+                  <p style={{ fontSize: '11px', color: 'var(--text-secondary)', maxWidth: '240px', lineHeight: 1.4 }}>
+                    Your recording history will appear here once you save your consultations.
+                  </p>
+                </div>
+              )}
+            </>
+          )}
         </>
+      )}
+
+      {recordingState === 'idle' && (
+        <BottomNav activeTab={activeTab} onChangeTab={setActiveTab} />
       )}
 
       {/* Source Lost Alert Modal */}
@@ -916,35 +1178,6 @@ export default function App() {
               </button>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* Advanced Settings fold shown only in idle to declutter recording view */}
-      {recordingState === 'idle' && (
-        <div className="accordion">
-          <button
-            className="accordion-header"
-            onClick={() => setAdvancedExpanded(!advancedExpanded)}
-            aria-expanded={advancedExpanded}
-          >
-            <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <Settings size={14} />
-              Advanced Settings
-            </span>
-            <ChevronDown
-              size={14}
-              className={`accordion-icon ${advancedExpanded ? 'expanded' : ''}`}
-            />
-          </button>
-          {advancedExpanded && (
-            <div className="accordion-content">
-              {/* Native audio helper */}
-              <AudioHelperSection appAudio={appAudio} />
-
-              {/* Logs */}
-              <LogsSection lines={logLines} />
-            </div>
-          )}
         </div>
       )}
     </div>

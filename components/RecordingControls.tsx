@@ -63,15 +63,15 @@ export function RecordingControls({
 
       {/* Main recording panel (shown while active) */}
       {!isIdle && (
-        <div className="recording-panel">
-          <div className="timer-display">
+        <div className="recording-panel" style={{ padding: '16px 12px', margin: '4px 0' }}>
+          <div className="timer-display" style={{ justifyContent: 'center' }}>
             <span className={`pulse-indicator ${isRecording || isStarting ? 'pulse-active' : 'pulse-paused'}`} />
             {formatTime(duration)} / 30:00
           </div>
-          <div className="recording-status-text">{statusLabel()}</div>
+          <div className="recording-status-text" style={{ textAlign: 'center' }}>{statusLabel()}</div>
 
           {/* Action buttons */}
-          <div className="sp-actions-row">
+          <div className="sp-actions-row--hud" style={{ marginTop: 12 }}>
             {isRecording && (
               <button className="sp-btn sp-btn--secondary" onClick={onPause}>
                 <Icon icon={Pause} size={14} />
@@ -101,21 +101,37 @@ export function RecordingControls({
       )}
 
       {isIdle && (
-        <div className="btn-record-container">
-          <button className="btn-record-main" onClick={onStart}>
-            <Icon icon={CircleDot} size={28} />
-            <span className="btn-record-main-label">Start</span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, width: '100%', marginTop: 4 }}>
+          <button
+            className="sp-btn sp-btn--primary"
+            onClick={onStart}
+            style={{
+              padding: '12px 20px',
+              fontSize: '12px',
+              textTransform: 'uppercase',
+              fontWeight: 700,
+              letterSpacing: '0.05em',
+              justifyContent: 'center',
+              boxShadow: '0 4px 12px rgba(59, 130, 246, 0.25)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              width: '100%',
+            }}
+          >
+            <Icon icon={CircleDot} size={15} />
+            Start Recording Session
           </button>
         </div>
       )}
 
       {isStarting && !isStopping && (
-        <p className="sp-hint" style={{ textAlign: 'center', marginTop: 4 }}>
+        <p className="sp-hint" style={{ textAlign: 'center', marginTop: 8 }}>
           Choose a screen or window source in the browser popup to begin recording.
         </p>
       )}
       {isStopping && (
-        <p className="sp-hint" style={{ textAlign: 'center', marginTop: 4 }}>
+        <p className="sp-hint" style={{ textAlign: 'center', marginTop: 8 }}>
           Finalizing video — please wait a moment.
         </p>
       )}
@@ -124,7 +140,7 @@ export function RecordingControls({
       {(isRecording || isPaused) && showArmCurrentTab && (
         <div className="sp-arm-prompt" style={{ marginTop: 12 }}>
           <p className="sp-arm-text">The tab you are viewing is not being recorded yet.</p>
-          <button className="sp-btn sp-btn--secondary sp-btn--sm" onClick={onArmCurrentTab} style={{ alignSelf: 'flex-start' }}>
+          <button className="sp-btn sp-btn--secondary sp-btn--sm" onClick={onArmCurrentTab} style={{ alignSelf: 'center', width: '100%', justifyContent: 'center' }}>
             <Icon icon={Focus} size={13} />
             Record this tab
           </button>
