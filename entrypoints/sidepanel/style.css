@@ -1146,6 +1146,27 @@ input[type="range"]::-webkit-slider-thumb:hover {
   }
 }
 
+.sp-alert--warning {
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: var(--color-warning);
+}
+
+.sp-alert--warning.sp-alert--pulse {
+  animation: sp-alert-warning-pulse-anim 1.8s infinite;
+}
+
+@keyframes sp-alert-warning-pulse-anim {
+  0%, 100% {
+    border-color: rgba(245, 158, 11, 0.25);
+    background: rgba(245, 158, 11, 0.08);
+  }
+  50% {
+    border-color: rgba(245, 158, 11, 0.55);
+    background: rgba(245, 158, 11, 0.16);
+  }
+}
+
 /* ---- Permission Screen (Onboarding UX) ---- */
 .permission-screen {
   display: flex;

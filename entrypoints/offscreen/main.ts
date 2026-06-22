@@ -14,6 +14,8 @@ import { DEFAULT_AUDIO_SETTINGS, type AudioMixSettings } from '../../utils/types
 import { StreamHealthMonitor, type StreamHealthEvent } from '../../utils/streamHealthMonitor';
 import { AudioHealthMonitor, type AudioHealthEvent } from '../../utils/audioHealthMonitor';
 import { ChunkStorage } from '../../utils/chunkStorage';
+import { RECORDING_LIMITS } from '../../utils/recordingLimits';
+
 
 let recorder: ScreenRecorder | null = null;
 let canvasRouter: CanvasRouter | null = null;
@@ -40,7 +42,7 @@ let dummyGainNode: GainNode | null = null;
 chrome.runtime.sendMessage({ type: 'OFFSCREEN_READY' }).catch(() => undefined);
 
 recorder = new ScreenRecorder({
-  onRecordingReady: async (sessionId, mimeType) => {
+  onRecordingReady: async (sessionId, mimeType, stopReason) => {
     try {
       console.log('[offscreen] assembling final blob for session:', sessionId);
       const storage = new ChunkStorage();
@@ -55,6 +57,7 @@ recorder = new ScreenRecorder({
           sessionId,
           mimeType,
           blobUrl,
+          stopReason,
         });
       } else {
         throw new Error('Assembled blob is empty');
@@ -79,6 +82,18 @@ recorder = new ScreenRecorder({
       type: state === 'paused' ? 'RECORDING_PAUSED' : 'RECORDING_RESUMED',
     });
   },
+  onLimitEvent: (event, elapsedMs, message) => {
+    chrome.runtime.sendMessage({
+      type: 'RECORDING_LIMIT_EVENT',
+      payload: {
+        event,
+        elapsedMs,
+        remainingMs: RECORDING_LIMITS.maxDurationMs - elapsedMs,
+        remainingToMaxMs: RECORDING_LIMITS.maxDurationMs - elapsedMs,
+        message,
+      }
+    }).catch(() => undefined);
+  },
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -94,8 +109,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ success: true });
       break;
     case 'STOP_RECORDING':
-      void stopCapture().then(() => sendResponse({ success: true }));
+      void stopCapture(message.reason).then(() => sendResponse({ success: true }));
       return true;
+    case 'USER_CHOSE_CONTINUE_TO_MAX':
+      recorder?.confirmDurationExtension();
+      sendResponse({ success: true });
+      break;
     case 'PAUSE_RECORDING':
       recorder?.pause();
       sendResponse({ success: true });
@@ -210,8 +229,10 @@ async function primeOffscreenAudioPermission(): Promise<void> {
     console.log('[offscreen] audio permission primed');
   } catch (err: unknown) {
     const name = err instanceof DOMException ? err.name : '';
-    if (name !== 'NotFoundError' && name !== 'NotAllowedError') {
+    if (name !== 'NotFoundError' && name !== 'NotAllowedError' && name !== 'NotReadableError') {
       console.warn('[offscreen] audio permission primer:', name);
+    } else {
+      console.log('[offscreen] audio permission primer bypassed/not readable (mic may be disabled or occupied):', name);
     }
   }
 }
@@ -431,22 +452,30 @@ async function startCapture(message: {
   sessionId?: string;
   isContinuation?: boolean;
   initialDuration?: number;
+  hasConfirmedDurationExtension?: boolean;
   os?: string;
 }): Promise<void> {
   const audioSettings = message.audioSettings ?? DEFAULT_AUDIO_SETTINGS;
   const isLinux = message.os === 'linux' || /linux/i.test(navigator.userAgent);
   let mixResult: ReturnType<typeof mixAudioStreams> = null;
+  let currentStep = 'initializing';
 
   try {
-    await primeOffscreenAudioPermission();
+    if (message.includeMic) {
+      currentStep = 'priming_mic_permission';
+      await primeOffscreenAudioPermission();
+    }
+    currentStep = 'snapshotting_baseline_audio_devices';
     await snapshotBaselineAudioDevices();
 
     if (message.initialStreamId) {
+      currentStep = 'capturing_tab_stream';
       console.log('[offscreen] capturing tab stream (Focus 1-1)…');
       screenStream = await captureTabStream(message.initialStreamId, true);
     } else if (message.focusMode) {
       throw new Error('Tab capture failed. Switch to a recordable tab and try again.');
     } else {
+      currentStep = 'opening_screen_picker';
       console.log('[offscreen] opening screen picker (getDisplayMedia)…');
       screenStream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
@@ -457,6 +486,7 @@ async function startCapture(message: {
       // Hoist surface to outer scope so we can wait for app audio below.
       const firstTrack = screenStream.getVideoTracks()[0];
       if (firstTrack) {
+        currentStep = 'detecting_display_surface';
         detectedSurface = (firstTrack.getSettings() as any).displaySurface as string | undefined;
         const sourceLabel = firstTrack.label?.trim() || undefined;
         chrome.runtime
@@ -482,6 +512,7 @@ async function startCapture(message: {
 
     // Wait for native virtual device BEFORE starting recorder (mirror sink only).
     if (isNativeMirrorSurface(detectedSurface) && isLinux) {
+      currentStep = 'waiting_mirror_sink';
       console.log('[offscreen] waiting for mirror sink attach before recorder…');
       const attached = await waitForAppAudioStream(25_000);
       if (attached) {
@@ -497,6 +528,7 @@ async function startCapture(message: {
     }
 
     if (message.includeMic) {
+      currentStep = 'acquiring_mic_stream';
       try {
         micStream = await navigator.mediaDevices.getUserMedia({
           audio: {
@@ -523,8 +555,10 @@ async function startCapture(message: {
       void stopCapture();
     };
 
+    currentStep = 'initializing_canvas_router';
     canvasRouter = new CanvasRouter({ width: 1920, height: 1080, fps: 30 });
     canvasRouter.setActiveSource(new MediaStream([videoTrack]));
+    currentStep = 'waiting_canvas_first_frame';
     await canvasRouter.waitForFrame();
     console.log('[offscreen] canvas ready, starting recorder…');
 
@@ -537,7 +571,7 @@ async function startCapture(message: {
         canvasRouter?.switchToPlaceholder('Video Source Lost');
       }
     });
-    
+
     audioMonitor = new AudioHealthMonitor((event, trackId) => {
       chrome.runtime.sendMessage({ type: 'AUDIO_HEALTH_EVENT', event, trackId }).catch(() => undefined);
     });
@@ -597,6 +631,7 @@ async function startCapture(message: {
     }
 
     if (systemAudioTrack || micAudioTrack) {
+      currentStep = 'mixing_audio_streams';
       mixResult = mixAudioStreams(
         systemAudioTrack ? new MediaStream([systemAudioTrack]) : null,
         micStream,
@@ -630,13 +665,15 @@ async function startCapture(message: {
       additionalTracksToCleanup.push(...micStream.getTracks());
     }
 
+    currentStep = 'starting_media_recorder';
     await recorder?.start(
       finalStream,
       additionalTracksToCleanup,
       mixResult?.audioContext ?? null,
       message.sessionId,
       message.isContinuation ?? false,
-      message.initialDuration ?? 0
+      message.initialDuration ?? 0,
+      message.hasConfirmedDurationExtension ?? false
     );
     const hasAudio = finalStream.getAudioTracks().length > 0;
     console.log(
@@ -646,19 +683,30 @@ async function startCapture(message: {
     chrome.runtime.sendMessage({ type: 'CAPTURE_STARTED' });
 
   } catch (err: any) {
-    console.error('[offscreen] startCapture error:', err);
     const isCancellation =
-      err.name === 'NotAllowedError' || err.message?.includes('Permission denied');
+      err.name === 'NotAllowedError' ||
+      err.name === 'AbortError' ||
+      err.message?.includes('Permission denied');
     const isNotFound =
       err.name === 'NotFoundError' || err.message?.toLowerCase().includes('not found');
 
-    let errorMessage = err.message || 'Failed to start screen capture';
-    if (isCancellation) errorMessage = 'Recording cancelled';
-    else if (isNotFound && message.focusMode)
-      errorMessage =
-        'Tab capture failed (device not found). Stay on the selected tab and try again.';
+    const captureMode = message.initialStreamId ? 'tab-capture' : (message.focusMode ? 'focus-mode' : 'screen-picker');
+    console.error(`[offscreen] startCapture error at step [${currentStep}] (mode: ${captureMode}):`, {
+      name: err?.name,
+      message: err?.message,
+      stack: err?.stack,
+    });
 
-    chrome.runtime.sendMessage({ type: 'RECORDING_ERROR', error: errorMessage });
+    let errorMessage = err.message || 'Failed to start screen capture';
+    if (isCancellation) {
+      chrome.runtime.sendMessage({ type: 'CAPTURE_CANCELLED' });
+    } else {
+      if (isNotFound && message.focusMode)
+        errorMessage =
+          'Tab capture failed (device not found). Stay on the selected tab and try again.';
+
+      chrome.runtime.sendMessage({ type: 'RECORDING_ERROR', error: errorMessage });
+    }
     cleanupPartialCapture(mixResult?.audioContext ?? null);
   }
 }
@@ -720,8 +768,8 @@ async function switchSource(streamId: string): Promise<void> {
   }
 }
 
-async function stopCapture(): Promise<void> {
-  if (recorder) await recorder.stop();
+async function stopCapture(reason?: string): Promise<void> {
+  if (recorder) await recorder.stop(reason);
   cleanupCaptureResources();
 }
 
@@ -757,7 +805,7 @@ async function handleDeviceChange(): Promise<void> {
 
       if (newMicTrack && mixAudioContext && mixAudioContext.state !== 'closed') {
         console.log('[offscreen] Microphone re-acquired successfully. Re-attaching to mixer...');
-        
+
         micStream = newMicStream;
 
         // Gán lại các event handlers cho mic track mới
@@ -812,7 +860,7 @@ async function handleDeviceChange(): Promise<void> {
         } else {
           try {
             micSourceNode?.disconnect();
-          } catch (e) {}
+          } catch (e) { }
           micSourceNode = mixAudioContext.createMediaStreamSource(newMicStream);
         }
 
@@ -863,7 +911,7 @@ function cleanupPartialCapture(audioContext: AudioContext | null): void {
   appAudioStream = null;
   detectedSurface = undefined;
   baselineAudioDeviceIds = new Set();
-  
+
   streamMonitor?.destroy();
   streamMonitor = null;
   audioMonitor?.destroy();
@@ -872,26 +920,26 @@ function cleanupPartialCapture(audioContext: AudioContext | null): void {
   // Ngắt kết nối tường minh Web Audio Graph
   try {
     micSourceNode?.disconnect();
-  } catch (e) {}
+  } catch (e) { }
   try {
     systemSourceNode?.disconnect();
-  } catch (e) {}
+  } catch (e) { }
   try {
     micGainNode?.disconnect();
-  } catch (e) {}
+  } catch (e) { }
   try {
     systemGainNode?.disconnect();
-  } catch (e) {}
+  } catch (e) { }
   try {
     compressorNode?.disconnect();
-  } catch (e) {}
+  } catch (e) { }
   try {
     dummyOscillatorNode?.stop();
     dummyOscillatorNode?.disconnect();
-  } catch (e) {}
+  } catch (e) { }
   try {
     dummyGainNode?.disconnect();
-  } catch (e) {}
+  } catch (e) { }
 
   micSourceNode = null;
   micGainNode = null;
@@ -932,7 +980,7 @@ function cleanupCaptureResources(): void {
   appAudioStream = null;
   detectedSurface = undefined;
   baselineAudioDeviceIds = new Set();
-  
+
   streamMonitor?.destroy();
   streamMonitor = null;
   audioMonitor?.destroy();
@@ -941,26 +989,26 @@ function cleanupCaptureResources(): void {
   // Ngắt kết nối tường minh Web Audio Graph
   try {
     micSourceNode?.disconnect();
-  } catch (e) {}
+  } catch (e) { }
   try {
     systemSourceNode?.disconnect();
-  } catch (e) {}
+  } catch (e) { }
   try {
     micGainNode?.disconnect();
-  } catch (e) {}
+  } catch (e) { }
   try {
     systemGainNode?.disconnect();
-  } catch (e) {}
+  } catch (e) { }
   try {
     compressorNode?.disconnect();
-  } catch (e) {}
+  } catch (e) { }
   try {
     dummyOscillatorNode?.stop();
     dummyOscillatorNode?.disconnect();
-  } catch (e) {}
+  } catch (e) { }
   try {
     dummyGainNode?.disconnect();
-  } catch (e) {}
+  } catch (e) { }
 
   micSourceNode = null;
   micGainNode = null;

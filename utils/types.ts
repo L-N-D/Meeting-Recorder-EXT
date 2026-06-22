@@ -1,4 +1,6 @@
 export type RecordingState = 'idle' | 'starting' | 'recording' | 'paused' | 'interrupted';
+import { type RecordingLimitEvent } from './recordingLimits';
+
 
 export interface ActiveSessionMetadata {
   sessionId: string;
@@ -89,6 +91,10 @@ export interface RecordingStatusPayload {
   focusMode: boolean;
   audioSettings: AudioMixSettings;
   appAudio: AppAudioState;
+  sourceQualityWarning?: string | null;
+  limitEvent?: RecordingLimitEvent | null;
+  hasConfirmedDurationExtension?: boolean;
+  infoMessage?: string | null;
 }
 
 // ---- Log lines broadcast from background ------------------------------------

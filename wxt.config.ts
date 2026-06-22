@@ -5,8 +5,8 @@ export default defineConfig({
   modules: ['@wxt-dev/module-react'],
   manifest: {
     name: 'EXT Recorder',
-    description: 'Screen, tab and application recorder with native Linux audio mirror support.',
-    version: '2.2.0',
+    description: 'Screen, tab and application recorder with native Linux audio mirror support V2.4.',
+    version: '2.4.0.0',
     // Fixed public key → deterministic extension id
     // (plmehkdmfenfighdnboaknnolkpngdpb) so the native messaging host's
     // allowed_origins stays valid across reloads. See native-helper/.

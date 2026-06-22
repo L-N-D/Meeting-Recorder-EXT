@@ -48,3 +48,9 @@ thin client that sends commands and renders broadcast state.
 * Fixed a download race that could truncate large recordings.
 * Removed dead code (unused in-page widget, permissions onboarding page, and
   unwired "add source" path) for a cleaner, easier-to-debug codebase.
+
+## Hotfixes (v2.0.1 - June 2026)
+* **Audio Permission Primer Fix**: Bypassed `NotReadableError` in offscreen's mic priming, shifting it from a warning to a debug log to avoid user confusion when default input is busy.
+* **Heartbeat & Storage Crash Fix**: Offloaded storage persistence from the Offscreen Document to the Background Service Worker using `RECORDING_HEARTBEAT` message passing, eliminating the runtime `TypeError` in MV3.
+* **Empty Chunk Logging Refinement**: Log empty chunks as info during stop sequences (normal browser behavior) and only warn if they occur unexpectedly while actively recording.
+

@@ -1,6 +1,8 @@
 import { ChunkStorage } from './chunkStorage';
 import { fixWebmDuration } from './webmDurationFix';
 import { RecordingWatchdog } from './recordingWatchdog';
+import { RecordingDurationLimiter } from './durationLimiter';
+import { RECORDING_LIMITS, type RecordingLimitEvent } from './recordingLimits';
 
 /**
  * Helper class to manage the MediaRecorder lifecycle, chunk collection,
@@ -9,7 +11,7 @@ import { RecordingWatchdog } from './recordingWatchdog';
 export class ScreenRecorder {
   private mediaRecorder: MediaRecorder | null = null;
   private chunkStorage = new ChunkStorage();
-  private onRecordingReady: (sessionId: string, mimeType: string) => void;
+  private onRecordingReady: (sessionId: string, mimeType: string, stopReason?: string) => void;
   private onTimeUpdate: (seconds: number) => void;
   private onError: (error: Error) => void;
   private onStateChange: (state: 'recording' | 'paused') => void;
@@ -26,23 +28,36 @@ export class ScreenRecorder {
   private pendingChunkWrites: Promise<void>[] = [];
   private stopResolve: (() => void) | null = null;
   private watchdog: RecordingWatchdog;
+  private durationLimiter: RecordingDurationLimiter;
+  private stopReason: string | null = null;
   private chunkCount = 0;
 
   constructor(options: {
-    onRecordingReady: (sessionId: string, mimeType: string) => void;
+    onRecordingReady: (sessionId: string, mimeType: string, stopReason?: string) => void;
     onTimeUpdate: (seconds: number) => void;
     onError: (error: Error) => void;
     onStateChange?: (state: 'recording' | 'paused') => void;
+    onLimitEvent?: (event: RecordingLimitEvent, elapsedMs: number, message: string) => void;
   }) {
     this.onRecordingReady = options.onRecordingReady;
     this.onTimeUpdate = options.onTimeUpdate;
     this.onError = options.onError;
     this.onStateChange = options.onStateChange ?? (() => undefined);
-    
+
     this.watchdog = new RecordingWatchdog((event) => {
       if (event === 'RECORDER_STALLED') {
         console.warn('[recorder] Watchdog detected stalled recording!');
         chrome.runtime.sendMessage({ type: 'RECORDING_WARNING', warning: 'Video encoding appears stalled. Output may be incomplete.' }).catch(() => undefined);
+      }
+    });
+
+    this.durationLimiter = new RecordingDurationLimiter((event, elapsedMs, message) => {
+      if (event === 'MAX_DURATION_REACHED') {
+        console.warn('[recorder] Hard limit reached! Automatically stopping recording.');
+        void this.stop('MAX_DURATION_REACHED');
+      }
+      if (options.onLimitEvent) {
+        options.onLimitEvent(event, elapsedMs, message);
       }
     });
   }
@@ -70,8 +85,12 @@ export class ScreenRecorder {
     audioContext: AudioContext | null = null,
     sessionId?: string,
     isContinuation = false,
-    initialDurationSec = 0
+    initialDurationSec = 0,
+    hasConfirmedDurationExtension = false
   ): Promise<void> {
+    this.durationLimiter.reset();
+    this.durationLimiter.setConfirmedExtension(hasConfirmedDurationExtension);
+    this.stopReason = null;
     this.tracksToCleanup = [...stream.getTracks(), ...additionalTracks];
     this.audioContextToCleanup = audioContext;
     this.startTime = Date.now();
@@ -145,7 +164,11 @@ export class ScreenRecorder {
         });
         this.pendingChunkWrites.push(write);
       } else {
-        console.warn('[recorder] dataavailable fired with empty data');
+        if (this.mediaRecorder?.state === 'recording') {
+          console.warn('[recorder] dataavailable fired with empty data while recording');
+        } else {
+          console.log('[recorder] dataavailable fired with empty data (normal during stop)');
+        }
       }
     };
 
@@ -178,9 +201,15 @@ export class ScreenRecorder {
     void this.updateHeartbeat(); // Write metadata immediately on start
 
     this.timerInterval = setInterval(() => {
-      const elapsedSeconds = Math.floor(this.getElapsedMs() / 1000);
+      const elapsedMs = this.getElapsedMs();
+      const elapsedSeconds = Math.floor(elapsedMs / 1000);
       this.onTimeUpdate(elapsedSeconds);
+      this.durationLimiter.check(elapsedMs);
     }, 1000);
+  }
+
+  public confirmDurationExtension(): void {
+    this.durationLimiter.setConfirmedExtension(true);
   }
 
   public pause(): void {
@@ -205,8 +234,9 @@ export class ScreenRecorder {
     }
   }
 
-  public stop(): Promise<void> {
+  public stop(reason?: string): Promise<void> {
     this.stopHeartbeatTimer();
+    this.stopReason = reason || null;
     if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
       return new Promise((resolve) => {
         this.stopResolve = resolve;
@@ -291,17 +321,20 @@ export class ScreenRecorder {
 
   private async updateHeartbeat(): Promise<void> {
     try {
-      const result = await chrome.storage.local.get(['activeSession']);
-      const activeSession = result.activeSession as any;
-      if (activeSession && activeSession.sessionId === this.chunkStorage.getSessionId()) {
-        activeSession.lastUpdateTime = Date.now();
-        activeSession.duration = Math.floor(this.getElapsedMs() / 1000);
-        activeSession.chunkCount = this.chunkCount;
-        activeSession.status = this.mediaRecorder?.state === 'paused' ? 'paused' : 'recording';
-        await chrome.storage.local.set({ activeSession });
-      }
+      const sessionId = this.chunkStorage.getSessionId();
+      const duration = Math.floor(this.getElapsedMs() / 1000);
+      const chunkCount = this.chunkCount;
+      const status = this.mediaRecorder?.state === 'paused' ? 'paused' : 'recording';
+
+      await chrome.runtime.sendMessage({
+        type: 'RECORDING_HEARTBEAT',
+        sessionId,
+        duration,
+        chunkCount,
+        status,
+      });
     } catch (err) {
-      console.warn('[recorder] failed to update heartbeat:', err);
+      console.warn('[recorder] failed to send heartbeat message:', err);
     }
   }
 
@@ -320,7 +353,7 @@ export class ScreenRecorder {
         return;
       }
 
-      this.onRecordingReady(sessionId, mimeType);
+      this.onRecordingReady(sessionId, mimeType, this.stopReason || undefined);
     } catch (err) {
       this.onError(new Error(`Failed to finalize recording: ${(err as Error).message}`));
     } finally {

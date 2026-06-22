@@ -38,6 +38,7 @@ import {
 import { OffscreenManager } from '../utils/offscreenManager';
 import { CameraManager } from '../utils/cameraManager';
 import { DownloadService } from '../utils/downloadService';
+import { type RecordingLimitEvent } from '../utils/recordingLimits';
 
 const LOG = '[background]';
 const MAX_LOG_LINES = 100;
@@ -76,6 +77,11 @@ let includeCam = false;
 let focusMode = false;
 let audioSettings: AudioMixSettings = { ...DEFAULT_AUDIO_SETTINGS };
 let currentError: string | null = null;
+let sourceQualityWarning: string | null = null;
+
+let currentLimitEvent: RecordingLimitEvent | null = null;
+let hasConfirmedDurationExtension = false;
+let currentInfoMessage: string | null = null;
 
 let focusStartTabId: number | null = null;
 let currentSourceTabId: number | null = null;
@@ -93,6 +99,10 @@ async function syncStateToStorage(): Promise<void> {
     focusMode,
     audioSettings,
     appAudioState,
+    sourceQualityWarning,
+    currentLimitEvent,
+    hasConfirmedDurationExtension,
+    currentInfoMessage,
   });
 }
 
@@ -106,6 +116,10 @@ async function hydrateStateFromStorage(): Promise<void> {
   if (data.focusMode !== undefined) focusMode = data.focusMode;
   if (data.audioSettings) audioSettings = data.audioSettings;
   if (data.appAudioState) appAudioState = data.appAudioState;
+  if (data.sourceQualityWarning !== undefined) sourceQualityWarning = data.sourceQualityWarning;
+  if (data.currentLimitEvent !== undefined) currentLimitEvent = data.currentLimitEvent;
+  if (data.hasConfirmedDurationExtension !== undefined) hasConfirmedDurationExtension = data.hasConfirmedDurationExtension;
+  if (data.currentInfoMessage !== undefined) currentInfoMessage = data.currentInfoMessage;
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +315,7 @@ const downloadService = new DownloadService((error?: string, targetSessionId?: s
   recordingState = 'idle';
   duration = 0;
   currentError = error ?? null;
+  sourceQualityWarning = null;
   currentSourceTabId = null;
   broadcastState();
   broadcastBubbleRefresh();
@@ -360,6 +375,7 @@ async function handleOffscreenCrash(): Promise<void> {
   clearCaptureWatchdog();
   recordingState = 'interrupted';
   currentError = 'Recording was interrupted due to offscreen document crash.';
+  sourceQualityWarning = null;
   broadcastState();
   
   tabFocusDetector.stop();
@@ -389,6 +405,7 @@ function armCaptureWatchdog(): void {
     duration = 0;
     currentError =
       'Capture did not start. No source was selected, or the screen dialog was blocked. Please try again.';
+    sourceQualityWarning = null;
     broadcastState();
     tabFocusDetector.stop();
     currentSourceTabId = null;
@@ -417,6 +434,10 @@ function getStatusPayload(): RecordingStatusPayload {
     focusMode,
     audioSettings,
     appAudio: appAudioState,
+    sourceQualityWarning,
+    limitEvent: currentLimitEvent,
+    hasConfirmedDurationExtension,
+    infoMessage: currentInfoMessage,
   };
 }
 
@@ -702,6 +723,56 @@ export default defineBackground(() => {
         sendResponse({ success: true });
         break;
 
+      case 'RECORDING_HEARTBEAT':
+        if (currentSessionId && currentSessionId === message.sessionId) {
+          chrome.storage.local.get(['activeSession'], (res) => {
+            const activeSession = res.activeSession as any;
+            if (activeSession && activeSession.sessionId === message.sessionId) {
+              activeSession.lastUpdateTime = Date.now();
+              activeSession.duration = message.duration;
+              activeSession.chunkCount = message.chunkCount;
+              activeSession.status = message.status;
+              chrome.storage.local.set({ activeSession }).catch(() => undefined);
+            }
+          });
+        }
+        sendResponse({ success: true });
+        break;
+      case 'RECORDING_LIMIT_EVENT':
+        currentLimitEvent = message.payload.event;
+        if (message.payload.event === 'USER_CHOSE_CONTINUE_TO_MAX') {
+          hasConfirmedDurationExtension = true;
+        }
+        broadcastState();
+        sendResponse({ success: true });
+        break;
+
+      case 'USER_CHOSE_CONTINUE_TO_MAX':
+        hasConfirmedDurationExtension = true;
+        currentLimitEvent = null;
+        chrome.storage.local.get(['activeSession'], (res) => {
+          const activeSession = res.activeSession as any;
+          if (activeSession) {
+            activeSession.hasConfirmedDurationExtension = true;
+            chrome.storage.local.set({ activeSession }).catch(() => undefined);
+          }
+        });
+        chrome.runtime.sendMessage({ type: 'USER_CHOSE_CONTINUE_TO_MAX' }).catch(() => undefined);
+        broadcastState();
+        sendResponse({ success: true });
+        break;
+
+      case 'USER_CHOSE_STOP_AT_RECOMMENDED':
+        stopRecordingFlow('USER_STOPPED_AT_RECOMMENDED_DURATION');
+        sendResponse({ success: true });
+        break;
+
+      case 'DISMISS_INFO_MESSAGE':
+        currentInfoMessage = null;
+        broadcastState();
+        sendResponse({ success: true });
+        break;
+
       case 'RECORDING_PAUSED':
         recordingState = 'paused';
         broadcastState();
@@ -720,6 +791,18 @@ export default defineBackground(() => {
           currentError = 'Video source was lost. Recording continues with placeholder.';
           broadcastState();
         }
+        sendResponse({ success: true });
+        break;
+
+      case 'SOURCE_QUALITY_WARNING':
+        sourceQualityWarning = message.payload.message;
+        broadcastState();
+        sendResponse({ success: true });
+        break;
+
+      case 'SOURCE_QUALITY_WARNING_CLEARED':
+        sourceQualityWarning = null;
+        broadcastState();
         sendResponse({ success: true });
         break;
 
@@ -807,6 +890,28 @@ export default defineBackground(() => {
         void sendAttachAppAudioToOffscreen().then(() => sendResponse({ success: true }));
         break;
 
+      case 'CAPTURE_CANCELLED':
+        stopOffscreenWatchdog();
+        chrome.storage.local.remove('activeSession').catch(() => undefined);
+        currentSessionId = null;
+        clearCaptureWatchdog();
+        currentError = null;
+        sourceQualityWarning = null;
+        currentLimitEvent = null;
+        hasConfirmedDurationExtension = false;
+        bgLog('info', 'Capture cancelled by user');
+        recordingState = 'idle';
+        duration = 0;
+        broadcastState();
+        tabFocusDetector.stop();
+        currentSourceTabId = null;
+        broadcastBubbleRefresh();
+        cameraManager.cleanup();
+        void offscreenManager.closeDocument();
+        void doCleanupNativeAudio();
+        sendResponse({ success: true });
+        break;
+
       case 'RECORDING_ERROR':
         stopOffscreenWatchdog();
         chrome.storage.local.remove('activeSession').catch(() => undefined);
@@ -831,7 +936,16 @@ export default defineBackground(() => {
         chrome.storage.local.remove('activeSession').catch(() => undefined);
         currentSessionId = null;
         tabFocusDetector.stop();
-        bgLog('info', `RECORDING_COMPLETE mimeType=${message.mimeType} sessionId=${message.sessionId}`);
+        bgLog('info', `RECORDING_COMPLETE mimeType=${message.mimeType} sessionId=${message.sessionId} stopReason=${message.stopReason}`);
+        
+        if (message.stopReason === 'MAX_DURATION_REACHED') {
+          currentInfoMessage = 'Maximum recording duration reached. Recording has been stopped automatically.';
+        } else if (message.stopReason === 'USER_STOPPED_AT_RECOMMENDED_DURATION') {
+          currentInfoMessage = 'Recording stopped at the recommended 30-minute duration.';
+        } else {
+          currentInfoMessage = null;
+        }
+
         const streamUrl = chrome.runtime.getURL(`/stream-download?sessionId=${message.sessionId}&mimeType=${encodeURIComponent(message.mimeType)}`);
         downloadService.download(message.blobUrl || streamUrl, message.mimeType, message.sessionId);
         sendResponse({ success: true });
@@ -947,6 +1061,9 @@ export default defineBackground(() => {
           recordingState = 'idle';
           currentError = null;
           duration = 0;
+          currentLimitEvent = null;
+          hasConfirmedDurationExtension = false;
+          currentInfoMessage = null;
           broadcastState();
           sendResponse({ success: true });
         }).catch((err) => {
@@ -959,6 +1076,9 @@ export default defineBackground(() => {
           recordingState = 'idle';
           currentError = null;
           duration = 0;
+          currentLimitEvent = null;
+          hasConfirmedDurationExtension = false;
+          currentInfoMessage = null;
           broadcastState();
           sendResponse({ success: true });
         }).catch((err) => {
@@ -1177,6 +1297,9 @@ async function autoMirrorAllStreams(opts: { sessionName: string; sinkName: strin
 function startRecordingFlow(startingTabId?: number): void {
   recordingState = 'starting';
   currentError = null;
+  currentLimitEvent = null;
+  hasConfirmedDurationExtension = false;
+  currentInfoMessage = null;
   attachAppAudioRetryCount = 0;
   currentSessionId = `session-${Date.now()}`;
   focusStartTabId = focusMode ? (startingTabId ?? null) : null;
@@ -1257,6 +1380,9 @@ async function resumeRecordingFlow(): Promise<void> {
 
     recordingState = 'starting';
     currentError = null;
+    currentLimitEvent = null;
+    currentInfoMessage = null;
+    hasConfirmedDurationExtension = activeSession.hasConfirmedDurationExtension || false;
     attachAppAudioRetryCount = 0;
     currentSessionId = activeSession.sessionId;
     includeMic = activeSession.includeMic;
@@ -1298,6 +1424,7 @@ async function resumeRecordingFlow(): Promise<void> {
       sessionId: currentSessionId,
       isContinuation: true,
       initialDuration: duration,
+      hasConfirmedDurationExtension,
       os: platformInfo.os,
     });
     bgLog('info', 'START_RECORDING (resume) sent to offscreen');
@@ -1315,15 +1442,15 @@ async function resumeRecordingFlow(): Promise<void> {
   }
 }
 
-function stopRecordingFlow(): void {
+function stopRecordingFlow(reason?: string): void {
   if (recordingState !== 'recording' && recordingState !== 'paused') return;
 
   recordingState = 'starting'; // renders "Saving…"
   broadcastState();
   tabFocusDetector.stop();
-  bgLog('info', 'stopRecordingFlow');
+  bgLog('info', `stopRecordingFlow reason=${reason || 'normal'}`);
 
-  chrome.runtime.sendMessage({ type: 'STOP_RECORDING' }).catch(async (err) => {
+  chrome.runtime.sendMessage({ type: 'STOP_RECORDING', reason }).catch(async (err) => {
     bgLog('error', `failed to send stop command: ${err}`);
     recordingState = 'idle';
     currentError = 'Failed to stop recording. Please try again.';

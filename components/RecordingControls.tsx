@@ -66,10 +66,10 @@ export function RecordingControls({
         <div className="recording-panel">
           <div className="timer-display">
             <span className={`pulse-indicator ${isRecording || isStarting ? 'pulse-active' : 'pulse-paused'}`} />
-            {formatTime(duration)}
+            {formatTime(duration)} / 30:00
           </div>
           <div className="recording-status-text">{statusLabel()}</div>
-          
+
           {/* Action buttons */}
           <div className="sp-actions-row">
             {isRecording && (

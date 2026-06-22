@@ -41,6 +41,9 @@ export default function App() {
   });
   const [error, setError] = useState<string | null>(null);
   const [appAudio, setAppAudio] = useState<AppAudioState>({ ...DEFAULT_APP_AUDIO_STATE });
+  const [limitEvent, setLimitEvent] = useState<string | null>(null);
+  const [hasConfirmedDurationExtension, setHasConfirmedDurationExtension] = useState(false);
+  const [infoMessage, setInfoMessage] = useState<string | null>(null);
 
   // ---- Focus 1-1 state -----------------------------------------------------
   const [activeTabId, setActiveTabId] = useState<number | null>(null);
@@ -67,6 +70,9 @@ export default function App() {
   // ---- Audio Alert State ----
   const [audioSilentAlert, setAudioSilentAlert] = useState(false);
   const [advancedExpanded, setAdvancedExpanded] = useState(false);
+
+  // ---- Source Quality Alert State ----
+  const [sourceQualityWarning, setSourceQualityWarning] = useState<string | null>(null);
 
   // ---- Permission States for Onboarding Setup ----
   const [micPermissionState, setMicPermissionState] = useState<'prompt' | 'granted' | 'denied'>('prompt');
@@ -160,10 +166,15 @@ export default function App() {
       focusMode: boolean;
       audioSettings: AudioMixSettings;
       appAudio?: AppAudioState;
+      sourceQualityWarning?: string | null;
+      limitEvent?: string | null;
+      hasConfirmedDurationExtension?: boolean;
+      infoMessage?: string | null;
     }) => {
       setRecordingState(state.recordingState);
       if (state.recordingState === 'idle') {
         setAudioSilentAlert(false);
+        setSourceQualityWarning(null);
       }
       setDuration(state.duration);
       setError(state.error);
@@ -172,6 +183,10 @@ export default function App() {
       setFocusMode(state.focusMode ?? false);
       setAudioSettings(state.audioSettings ?? { ...DEFAULT_AUDIO_SETTINGS });
       if (state.appAudio) setAppAudio(state.appAudio);
+      setSourceQualityWarning(state.sourceQualityWarning ?? null);
+      setLimitEvent(state.limitEvent ?? null);
+      setHasConfirmedDurationExtension(state.hasConfirmedDurationExtension ?? false);
+      setInfoMessage(state.infoMessage ?? null);
     },
     []
   );
@@ -211,6 +226,12 @@ export default function App() {
         } else if (message.event === 'AUDIO_ACTIVE') {
           setAudioSilentAlert(false);
         }
+      }
+      if (message.type === 'SOURCE_QUALITY_WARNING') {
+        setSourceQualityWarning(message.payload.message);
+      }
+      if (message.type === 'SOURCE_QUALITY_WARNING_CLEARED') {
+        setSourceQualityWarning(null);
       }
     };
 
@@ -330,15 +351,15 @@ export default function App() {
     try {
       const storage = new ChunkStorage();
       await storage.initExisting(interruptedSession.sessionId);
-      
+
       const mimeType = interruptedSession.mimeType || 'video/webm';
       let blob = await storage.assembleBlob(mimeType);
-      
+
       if (blob.size > 0) {
         // Derive duration dynamically from chunkCount (since chunks are written every 1000ms)
         const derivedDurationMs = chunkCount * 1000;
         blob = await fixWebmDuration(blob, derivedDurationMs);
-        
+
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
@@ -350,7 +371,7 @@ export default function App() {
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-        
+
         await storage.cleanup();
         chrome.runtime.sendMessage({ type: 'RECOVERED_SESSION_SAVED' });
       } else {
@@ -559,15 +580,58 @@ export default function App() {
         {(recordingState === 'recording' || recordingState === 'paused') && (
           <span className="sp-header-timer">
             <span className={`sp-dot ${recordingState === 'recording' ? 'sp-dot--pulse' : 'sp-dot--paused'}`} />
-            {formatTime(duration)}
+            {formatTime(duration)} / 30:00
           </span>
         )}
       </header>
 
-      {audioSilentAlert && (recordingState === 'recording' || recordingState === 'paused') && (
+      {infoMessage && (
+        <div className="sp-audio-alert sp-alert--info" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
+            <AlertCircle size={14} style={{ flexShrink: 0, marginTop: '2px' }} />
+            <span>{infoMessage}</span>
+          </div>
+          <button
+            onClick={() => chrome.runtime.sendMessage({ type: 'DISMISS_INFO_MESSAGE' })}
+            style={{ background: 'none', border: 'none', color: 'var(--color-accent-hover)', cursor: 'pointer', padding: 0, fontSize: '11px', fontWeight: 600, flexShrink: 0 }}
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {audioSilentAlert && includeMic && (recordingState === 'recording' || recordingState === 'paused') && (
         <div className="sp-audio-alert sp-alert--pulse">
           <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: '2px' }} />
           <span>Warning: No audio signal detected from microphone. Check your connection.</span>
+        </div>
+      )}
+
+      {sourceQualityWarning && (recordingState === 'recording' || recordingState === 'paused') && (
+        <div className="sp-audio-alert sp-alert--warning sp-alert--pulse">
+          <AlertCircle size={14} style={{ flexShrink: 0, marginTop: '2px' }} />
+          <span>{sourceQualityWarning}</span>
+        </div>
+      )}
+
+      {limitEvent === 'RECOMMENDED_DURATION_SOON' && (recordingState === 'recording' || recordingState === 'paused') && (
+        <div className="sp-audio-alert sp-alert--warning sp-alert--pulse">
+          <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: '2px' }} />
+          <span>Recording is close to the recommended 30-minute duration. Please prepare to finish the consultation.</span>
+        </div>
+      )}
+
+      {limitEvent === 'MAX_DURATION_SOON' && (recordingState === 'recording' || recordingState === 'paused') && (
+        <div className="sp-audio-alert sp-alert--pulse" style={{ borderColor: 'var(--color-danger)', background: 'rgba(239, 68, 68, 0.12)', color: 'var(--color-danger)' }}>
+          <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: '2px' }} />
+          <span style={{ fontWeight: 600 }}>Recording will automatically stop in 5 minutes. Maximum duration is 45 minutes.</span>
+        </div>
+      )}
+
+      {hasConfirmedDurationExtension && duration >= 30 * 60 && duration < 40 * 60 && (recordingState === 'recording' || recordingState === 'paused') && (
+        <div className="sp-audio-alert sp-alert--info">
+          <AlertCircle size={14} style={{ flexShrink: 0, marginTop: '2px' }} />
+          <span>Extended recording mode: recording will automatically stop at 45 minutes.</span>
         </div>
       )}
 
@@ -643,7 +707,7 @@ export default function App() {
             <div className="permission-instruction-box">
               <div style={{ fontWeight: 600, marginBottom: 4 }}>How to Unblock:</div>
               <ol style={{ paddingLeft: 16, fontSize: '11px', textAlign: 'left', lineHeight: 1.45 }}>
-                <li>Click the camera icon 📹 or site settings icon in your browser URL bar.</li>
+                <li>Click the camera icon or site settings icon in your browser URL bar.</li>
                 <li>Change Microphone/Camera block to <strong>"Allow"</strong>.</li>
                 <li>Click the <strong>Re-check Permissions</strong> button below.</li>
               </ol>
@@ -660,7 +724,7 @@ export default function App() {
                 Re-check Permissions
               </button>
             )}
-            
+
             <button
               className="sp-btn sp-btn--secondary"
               onClick={() => {
@@ -687,9 +751,9 @@ export default function App() {
             Saved chunks: <strong>{chunkCount}</strong>.
           </p>
           <div className="sp-actions-row" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <button 
-              className="sp-btn sp-btn--primary" 
-              onClick={handleResumeSession} 
+            <button
+              className="sp-btn sp-btn--primary"
+              onClick={handleResumeSession}
               disabled={recovering}
               style={{ width: '100%', justifyContent: 'center' }}
             >
@@ -697,9 +761,9 @@ export default function App() {
               Continue Recording
             </button>
             <div style={{ display: 'flex', gap: 8, width: '100%' }}>
-              <button 
-                className="sp-btn sp-btn--secondary" 
-                onClick={handleRecover} 
+              <button
+                className="sp-btn sp-btn--secondary"
+                onClick={handleRecover}
                 disabled={recovering}
                 style={{ flex: 1, justifyContent: 'center' }}
               >
@@ -715,9 +779,9 @@ export default function App() {
                   </>
                 )}
               </button>
-              <button 
-                className="sp-btn sp-btn--secondary" 
-                onClick={handleDiscard} 
+              <button
+                className="sp-btn sp-btn--secondary"
+                onClick={handleDiscard}
                 disabled={recovering}
                 style={{ flex: 1, justifyContent: 'center', borderColor: 'rgba(239, 68, 68, 0.4)', color: 'var(--color-danger)' }}
               >
@@ -783,14 +847,14 @@ export default function App() {
               <button className="sp-btn sp-btn--stop" onClick={handleFallbackStop} disabled={switchingSource}>
                 Stop & Save Recording
               </button>
-              
+
               {openTabs.length > 0 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                   <span style={{ fontSize: '10px', color: 'var(--text-secondary)', fontWeight: 600 }}>SWITCH TO ANOTHER TAB</span>
                   <div style={{ display: 'flex', gap: 6 }}>
-                    <select 
+                    <select
                       className="sp-select"
-                      value={selectedFallbackTab} 
+                      value={selectedFallbackTab}
                       onChange={(e) => setSelectedFallbackTab(e.target.value)}
                       disabled={switchingSource}
                     >
@@ -813,6 +877,42 @@ export default function App() {
 
               <button className="sp-btn sp-btn--secondary" onClick={handleKeepRecordingAudio} disabled={switchingSource}>
                 Keep Audio Only (shows placeholder)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Recommended Duration Decision Modal */}
+      {limitEvent === 'WAITING_DURATION_DECISION' && (recordingState === 'recording' || recordingState === 'paused') && (
+        <div className="sp-modal-overlay">
+          <div className="sp-modal" style={{ borderColor: 'rgba(245, 158, 11, 0.3)' }}>
+            <div className="sp-modal-title" style={{ color: 'var(--color-warning)' }}>
+              <AlertTriangle size={16} />
+              Recommended Limit Reached
+            </div>
+            <p className="sp-modal-text">
+              Recommended 30-minute recording duration reached. Do you want to stop now or continue recording for up to 15 more minutes?
+            </p>
+            <p className="sp-modal-text" style={{ fontSize: '11px', color: 'var(--text-muted)', borderLeft: '2px solid var(--color-warning)', paddingLeft: '8px', lineHeight: 1.4 }}>
+              Recording will continue while waiting for your choice to avoid missing consultation content.
+            </p>
+            <div className="sp-modal-actions">
+              <button
+                className="sp-btn sp-btn--stop"
+                onClick={() => {
+                  chrome.runtime.sendMessage({ type: 'USER_CHOSE_STOP_AT_RECOMMENDED' });
+                }}
+              >
+                Stop Recording
+              </button>
+              <button
+                className="sp-btn sp-btn--primary"
+                onClick={() => {
+                  chrome.runtime.sendMessage({ type: 'USER_CHOSE_CONTINUE_TO_MAX' });
+                }}
+              >
+                Continue to 45 minutes
               </button>
             </div>
           </div>
